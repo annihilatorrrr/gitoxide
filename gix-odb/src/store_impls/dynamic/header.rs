@@ -1,5 +1,6 @@
 use std::ops::Deref;
 
+use gix_features::zlib;
 use gix_hash::oid;
 
 use super::find::Error;
@@ -12,9 +13,10 @@ impl<S> super::Handle<S>
 where
     S: Deref<Target = super::Store> + Clone,
 {
-    fn try_header_inner<'b>(
+    pub(crate) fn try_header_inner<'b>(
         &'b self,
         mut id: &'b gix_hash::oid,
+        inflate: &mut zlib::Inflate,
         snapshot: &mut load_index::Snapshot,
         recursion: Option<DeltaBaseRecursion<'_>>,
     ) -> Result<Option<Header>, Error> {
@@ -70,10 +72,12 @@ where
                                 }
                             },
                         };
-                        let entry = pack.entry(pack_offset);
-                        let res = match pack.decode_header(entry, |id| {
-                            index_file.pack_offset_by_id(id).map(|pack_offset| {
-                                gix_pack::data::decode::header::ResolvedBase::InPack(pack.entry(pack_offset))
+                        let entry = pack.entry(pack_offset)?;
+                        let res = match pack.decode_header(entry, inflate, &|id| {
+                            index_file.pack_offset_by_id(id).and_then(|pack_offset| {
+                                pack.entry(pack_offset)
+                                    .ok()
+                                    .map(gix_pack::data::decode::header::ResolvedBase::InPack)
                             })
                         }) {
                             Ok(header) => Ok(header.into()),
@@ -85,9 +89,10 @@ where
                                 let hdr = self
                                     .try_header_inner(
                                         &base_id,
+                                        inflate,
                                         snapshot,
                                         recursion
-                                            .map(|r| r.inc_depth())
+                                            .map(DeltaBaseRecursion::inc_depth)
                                             .or_else(|| DeltaBaseRecursion::new(id).into()),
                                     )
                                     .map_err(|err| Error::DeltaBaseLookup {
@@ -111,7 +116,7 @@ where
                                     Some(res) => res,
                                     None => {
                                         let mut out = None;
-                                        for index in snapshot.indices.iter_mut() {
+                                        for index in &mut snapshot.indices {
                                             out = index.lookup(id);
                                             if out.is_some() {
                                                 break;
@@ -126,14 +131,14 @@ where
                                 let pack = possibly_pack
                                     .as_ref()
                                     .expect("pack to still be available like just now");
-                                let entry = pack.entry(pack_offset);
-                                pack.decode_header(entry, |id| {
+                                let entry = pack.entry(pack_offset)?;
+                                pack.decode_header(entry, inflate, &|id| {
                                     index_file
                                         .pack_offset_by_id(id)
-                                        .map(|pack_offset| {
-                                            gix_pack::data::decode::header::ResolvedBase::InPack(
-                                                pack.entry(pack_offset),
-                                            )
+                                        .and_then(|pack_offset| {
+                                            pack.entry(pack_offset)
+                                                .ok()
+                                                .map(gix_pack::data::decode::header::ResolvedBase::InPack)
                                         })
                                         .or_else(|| {
                                             (id == base_id).then(|| {
@@ -179,11 +184,10 @@ impl<S> crate::Header for super::Handle<S>
 where
     S: Deref<Target = super::Store> + Clone,
 {
-    type Error = Error;
-
-    fn try_header(&self, id: impl AsRef<oid>) -> Result<Option<Header>, Self::Error> {
-        let id = id.as_ref();
+    fn try_header(&self, id: &oid) -> Result<Option<Header>, gix_object::find::Error> {
         let mut snapshot = self.snapshot.borrow_mut();
-        self.try_header_inner(id, &mut snapshot, None)
+        let mut inflate = self.inflate.borrow_mut();
+        self.try_header_inner(id, &mut inflate, &mut snapshot, None)
+            .map_err(|err| Box::new(err) as _)
     }
 }

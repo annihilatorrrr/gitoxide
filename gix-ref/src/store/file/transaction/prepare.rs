@@ -13,7 +13,7 @@ use crate::{
     FullName, FullNameRef, Reference, Target,
 };
 
-impl<'s, 'p> Transaction<'s, 'p> {
+impl Transaction<'_, '_> {
     fn lock_ref_and_apply_change(
         store: &file::Store,
         lock_fail_mode: gix_lock::acquire::Fail,
@@ -51,7 +51,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
                     .map_err(Error::from),
                 (None, None) => Ok(None),
                 (maybe_loose, _) => Ok(maybe_loose),
-            });
+            })?;
         let lock = match &mut change.update.change {
             Change::Delete { expected, .. } => {
                 let (base, relative_path) = store.reference_path_with_base(change.update.name.as_ref());
@@ -70,22 +70,21 @@ impl<'s, 'p> Transaction<'s, 'p> {
                     .into()
                 };
 
-                let existing_ref = existing_ref?;
                 match (&expected, &existing_ref) {
                     (PreviousValue::MustNotExist, _) => {
                         panic!("BUG: MustNotExist constraint makes no sense if references are to be deleted")
                     }
-                    (PreviousValue::ExistingMustMatch(_), None)
-                    | (PreviousValue::MustExist, Some(_))
-                    | (PreviousValue::Any, Some(_))
-                    | (PreviousValue::Any, None) => {}
-                    (PreviousValue::MustExist, None) | (PreviousValue::MustExistAndMatch(_), None) => {
+                    (PreviousValue::ExistingMustMatch(_) | PreviousValue::Any, None)
+                    | (PreviousValue::MustExist | PreviousValue::Any, Some(_)) => {}
+                    (PreviousValue::MustExist | PreviousValue::MustExistAndMatch(_), None) => {
                         return Err(Error::DeleteReferenceMustExist {
                             full_name: change.name(),
                         })
                     }
-                    (PreviousValue::MustExistAndMatch(previous), Some(existing))
-                    | (PreviousValue::ExistingMustMatch(previous), Some(existing)) => {
+                    (
+                        PreviousValue::MustExistAndMatch(previous) | PreviousValue::ExistingMustMatch(previous),
+                        Some(existing),
+                    ) => {
                         let actual = existing.target.clone();
                         if *previous != actual {
                             let expected = previous.clone();
@@ -120,14 +119,12 @@ impl<'s, 'p> Transaction<'s, 'p> {
                 };
                 let mut lock = (!has_global_lock).then(obtain_lock).transpose()?;
 
-                let existing_ref = existing_ref?;
                 match (&expected, &existing_ref) {
                     (PreviousValue::Any, _)
                     | (PreviousValue::MustExist, Some(_))
-                    | (PreviousValue::MustNotExist, None)
-                    | (PreviousValue::ExistingMustMatch(_), None) => {}
+                    | (PreviousValue::MustNotExist | PreviousValue::ExistingMustMatch(_), None) => {}
                     (PreviousValue::MustExist, None) => {
-                        let expected = Target::Peeled(store.object_hash.null());
+                        let expected = Target::Object(store.object_hash.null());
                         let full_name = change.name();
                         return Err(Error::MustExist { full_name, expected });
                     }
@@ -141,8 +138,10 @@ impl<'s, 'p> Transaction<'s, 'p> {
                             });
                         }
                     }
-                    (PreviousValue::MustExistAndMatch(previous), Some(existing))
-                    | (PreviousValue::ExistingMustMatch(previous), Some(existing)) => {
+                    (
+                        PreviousValue::MustExistAndMatch(previous) | PreviousValue::ExistingMustMatch(previous),
+                        Some(existing),
+                    ) => {
                         if *previous != existing.target {
                             let actual = existing.target.clone();
                             let expected = previous.to_owned();
@@ -164,9 +163,9 @@ impl<'s, 'p> Transaction<'s, 'p> {
 
                 fn new_would_change_existing(new: &Target, existing: &Target) -> (bool, bool) {
                     match (new, existing) {
-                        (Target::Peeled(new), Target::Peeled(old)) => (old != new, false),
+                        (Target::Object(new), Target::Object(old)) => (old != new, false),
                         (Target::Symbolic(new), Target::Symbolic(old)) => (old != new, true),
-                        (Target::Peeled(_), _) => (true, false),
+                        (Target::Object(_), _) => (true, false),
                         (Target::Symbolic(_), _) => (true, true),
                     }
                 }
@@ -180,11 +179,11 @@ impl<'s, 'p> Transaction<'s, 'p> {
                 };
 
                 if (is_effective && !direct_to_packed_refs) || is_symbolic {
-                    let mut lock = lock.take().map(Ok).unwrap_or_else(obtain_lock)?;
+                    let mut lock = lock.take().map_or_else(obtain_lock, Ok)?;
 
                     lock.with_mut(|file| match new {
-                        Target::Peeled(oid) => write!(file, "{oid}"),
-                        Target::Symbolic(name) => write!(file, "ref: {}", name.0),
+                        Target::Object(oid) => write!(file, "{oid}"),
+                        Target::Symbolic(name) => writeln!(file, "ref: {}", name.0),
                     })?;
                     Some(lock.close()?)
                 } else {
@@ -197,22 +196,34 @@ impl<'s, 'p> Transaction<'s, 'p> {
     }
 }
 
-impl<'s, 'p> Transaction<'s, 'p> {
+impl Transaction<'_, '_> {
     /// Prepare for calling [`commit(…)`][Transaction::commit()] in a way that can be rolled back perfectly.
     ///
     /// If the operation succeeds, the transaction can be committed or dropped to cause a rollback automatically.
     /// Rollbacks happen automatically on failure and they tend to be perfect.
     /// This method is idempotent.
     pub fn prepare(
-        mut self,
+        self,
         edits: impl IntoIterator<Item = RefEdit>,
+        ref_files_lock_fail_mode: gix_lock::acquire::Fail,
+        packed_refs_lock_fail_mode: gix_lock::acquire::Fail,
+    ) -> Result<Self, Error> {
+        self.prepare_inner(
+            &mut edits.into_iter(),
+            ref_files_lock_fail_mode,
+            packed_refs_lock_fail_mode,
+        )
+    }
+
+    fn prepare_inner(
+        mut self,
+        edits: &mut dyn Iterator<Item = RefEdit>,
         ref_files_lock_fail_mode: gix_lock::acquire::Fail,
         packed_refs_lock_fail_mode: gix_lock::acquire::Fail,
     ) -> Result<Self, Error> {
         assert!(self.updates.is_none(), "BUG: Must not call prepare(…) multiple times");
         let store = self.store;
         let mut updates: Vec<_> = edits
-            .into_iter()
             .map(|update| Edit {
                 update,
                 lock: None,
@@ -222,14 +233,14 @@ impl<'s, 'p> Transaction<'s, 'p> {
             .collect();
         updates
             .pre_process(
-                |name| {
+                &mut |name| {
                     let symbolic_refs_are_never_packed = None;
                     store
                         .find_existing_inner(name, symbolic_refs_are_never_packed)
                         .map(|r| r.target)
                         .ok()
                 },
-                |idx, update| Edit {
+                &mut |idx, update| Edit {
                     update,
                     lock: None,
                     parent_index: Some(idx),
@@ -249,7 +260,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
         {
             let mut edits_for_packed_transaction = Vec::<RefEdit>::new();
             let mut needs_packed_refs_lookups = false;
-            for edit in updates.iter() {
+            for edit in &updates {
                 let log_mode = match edit.update.change {
                     Change::Update {
                         log: LogChange { mode, .. },
@@ -266,7 +277,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
                 };
                 if let Some(ref mut num_updates) = maybe_updates_for_packed_refs {
                     if let Change::Update {
-                        new: Target::Peeled(_), ..
+                        new: Target::Object(_), ..
                     } = edit.update.change
                     {
                         edits_for_packed_transaction.push(RefEdit {
@@ -274,8 +285,8 @@ impl<'s, 'p> Transaction<'s, 'p> {
                             ..edit.update.clone()
                         });
                         *num_updates += 1;
+                        continue;
                     }
-                    continue;
                 }
                 match edit.update.change {
                     Change::Update {
@@ -316,8 +327,13 @@ impl<'s, 'p> Transaction<'s, 'p> {
                         self.store
                             .assure_packed_refs_uptodate()?
                             .map(|p| {
-                                buffer_into_transaction(p, packed_refs_lock_fail_mode)
-                                    .map_err(Error::PackedTransactionAcquire)
+                                buffer_into_transaction(
+                                    p,
+                                    packed_refs_lock_fail_mode,
+                                    self.store.precompose_unicode,
+                                    self.store.namespace.clone(),
+                                )
+                                .map_err(Error::PackedTransactionAcquire)
                             })
                             .transpose()?
                     };
@@ -325,12 +341,10 @@ impl<'s, 'p> Transaction<'s, 'p> {
                     self.packed_transaction = Some(match &mut self.packed_refs {
                         PackedRefs::DeletionsAndNonSymbolicUpdatesRemoveLooseSourceReference(f)
                         | PackedRefs::DeletionsAndNonSymbolicUpdates(f) => {
-                            transaction.prepare(edits_for_packed_transaction, f)?
+                            transaction.prepare(&mut edits_for_packed_transaction.into_iter(), &**f)?
                         }
                         PackedRefs::DeletionsOnly => transaction
-                            .prepare(edits_for_packed_transaction, &mut |_, _| {
-                                unreachable!("BUG: deletions never trigger object lookups")
-                            })?,
+                            .prepare(&mut edits_for_packed_transaction.into_iter(), &gix_object::find::Never)?,
                     });
                 }
             }
@@ -341,7 +355,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
             if let Err(err) = Self::lock_ref_and_apply_change(
                 self.store,
                 ref_files_lock_fail_mode,
-                self.packed_transaction.as_ref().and_then(|t| t.buffer()),
+                self.packed_transaction.as_ref().and_then(packed::Transaction::buffer),
                 change,
                 self.packed_transaction.is_some(),
                 matches!(
@@ -376,7 +390,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
 
             // traverse parent chain from leaf/peeled ref and set the leaf previous oid accordingly
             // to help with their reflog entries
-            if let (Some(crate::TargetRef::Peeled(oid)), Some(parent_idx)) =
+            if let (Some(crate::TargetRef::Object(oid)), Some(parent_idx)) =
                 (change.update.change.previous_value(), change.parent_index)
             {
                 let oid = oid.to_owned();
@@ -416,10 +430,10 @@ fn possibly_adjust_name_for_prefixes(name: &FullNameRef) -> Option<FullName> {
                 Tag | LocalBranch | RemoteBranch | Note => name.into(),
                 MainRef | LinkedRef { .. } => sn
                     .category()
-                    .map_or(false, |cat| !cat.is_worktree_private())
+                    .is_some_and(|cat| !cat.is_worktree_private())
                     .then_some(sn),
             }
-            .map(|n| n.to_owned())
+            .map(ToOwned::to_owned)
         }
         None => Some(name.to_owned()), // allow (uncategorized/very special) refs to be packed
     }

@@ -14,7 +14,7 @@ pub(crate) fn shorten_path_with_cwd(cursor: PathBuf, cwd: &Path) -> PathBuf {
         }
     }
 
-    debug_assert_eq!(cursor.file_name().and_then(|f| f.to_str()), Some(DOT_GIT_DIR));
+    debug_assert_eq!(cursor.file_name().and_then(std::ffi::OsStr::to_str), Some(DOT_GIT_DIR));
     let parent = cursor.parent().expect(".git appended");
     cwd.strip_prefix(parent)
         .ok()
@@ -50,9 +50,9 @@ pub(crate) fn find_ceiling_height(search_dir: &Path, ceiling_dirs: &[PathBuf], c
         .filter_map(|ceiling_dir| {
             #[cfg(windows)]
             let ceiling_dir = dunce::simplified(ceiling_dir);
-            let mut ceiling_dir = gix_path::normalize(ceiling_dir, cwd)?;
+            let mut ceiling_dir = gix_path::normalize(ceiling_dir.into(), cwd)?;
             if !ceiling_dir.is_absolute() {
-                ceiling_dir = gix_path::normalize(cwd.join(ceiling_dir.as_ref()), cwd)?;
+                ceiling_dir = gix_path::normalize(cwd.join(ceiling_dir.as_ref()).into(), cwd)?;
             }
             search_dir
                 .strip_prefix(ceiling_dir.as_ref())

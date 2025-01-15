@@ -1,5 +1,4 @@
 use std::{
-    convert::TryFrom,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -35,34 +34,33 @@ pub enum Kind {
     Bare,
 }
 
-const TPL_INFO_EXCLUDE: &[u8] = include_bytes!("assets/baseline-init/info/exclude");
-const TPL_HOOKS_APPLYPATCH_MSG: &[u8] = include_bytes!("assets/baseline-init/hooks/applypatch-msg.sample");
-const TPL_HOOKS_COMMIT_MSG: &[u8] = include_bytes!("assets/baseline-init/hooks/commit-msg.sample");
-const TPL_HOOKS_FSMONITOR_WATCHMAN: &[u8] = include_bytes!("assets/baseline-init/hooks/fsmonitor-watchman.sample");
-const TPL_HOOKS_POST_UPDATE: &[u8] = include_bytes!("assets/baseline-init/hooks/post-update.sample");
-const TPL_HOOKS_PRE_APPLYPATCH: &[u8] = include_bytes!("assets/baseline-init/hooks/pre-applypatch.sample");
-const TPL_HOOKS_PRE_COMMIT: &[u8] = include_bytes!("assets/baseline-init/hooks/pre-commit.sample");
-const TPL_HOOKS_PRE_MERGE_COMMIT: &[u8] = include_bytes!("assets/baseline-init/hooks/pre-merge-commit.sample");
-const TPL_HOOKS_PRE_PUSH: &[u8] = include_bytes!("assets/baseline-init/hooks/pre-push.sample");
-const TPL_HOOKS_PRE_REBASE: &[u8] = include_bytes!("assets/baseline-init/hooks/pre-rebase.sample");
-const TPL_HOOKS_PRE_RECEIVE: &[u8] = include_bytes!("assets/baseline-init/hooks/pre-receive.sample");
-const TPL_HOOKS_PREPARE_COMMIT_MSG: &[u8] = include_bytes!("assets/baseline-init/hooks/prepare-commit-msg.sample");
-const TPL_HOOKS_UPDATE: &[u8] = include_bytes!("assets/baseline-init/hooks/update.sample");
-const TPL_DESCRIPTION: &[u8] = include_bytes!("assets/baseline-init/description");
-const TPL_HEAD: &[u8] = include_bytes!("assets/baseline-init/HEAD");
+const TPL_INFO_EXCLUDE: &[u8] = include_bytes!("assets/init/info/exclude");
+const TPL_HOOKS_APPLYPATCH_MSG: &[u8] = include_bytes!("assets/init/hooks/applypatch-msg.sample");
+const TPL_HOOKS_COMMIT_MSG: &[u8] = include_bytes!("assets/init/hooks/commit-msg.sample");
+const TPL_HOOKS_FSMONITOR_WATCHMAN: &[u8] = include_bytes!("assets/init/hooks/fsmonitor-watchman.sample");
+const TPL_HOOKS_POST_UPDATE: &[u8] = include_bytes!("assets/init/hooks/post-update.sample");
+const TPL_HOOKS_PRE_APPLYPATCH: &[u8] = include_bytes!("assets/init/hooks/pre-applypatch.sample");
+const TPL_HOOKS_PRE_COMMIT: &[u8] = include_bytes!("assets/init/hooks/pre-commit.sample");
+const TPL_HOOKS_PRE_MERGE_COMMIT: &[u8] = include_bytes!("assets/init/hooks/pre-merge-commit.sample");
+const TPL_HOOKS_PRE_PUSH: &[u8] = include_bytes!("assets/init/hooks/pre-push.sample");
+const TPL_HOOKS_PRE_REBASE: &[u8] = include_bytes!("assets/init/hooks/pre-rebase.sample");
+const TPL_HOOKS_PREPARE_COMMIT_MSG: &[u8] = include_bytes!("assets/init/hooks/prepare-commit-msg.sample");
+const TPL_HOOKS_DOCS_URL: &[u8] = include_bytes!("assets/init/hooks/docs.url");
+const TPL_DESCRIPTION: &[u8] = include_bytes!("assets/init/description");
+const TPL_HEAD: &[u8] = include_bytes!("assets/init/HEAD");
 
 struct PathCursor<'a>(&'a mut PathBuf);
 
 struct NewDir<'a>(&'a mut PathBuf);
 
-impl<'a> PathCursor<'a> {
+impl PathCursor<'_> {
     fn at(&mut self, component: &str) -> &Path {
         self.0.push(component);
         self.0.as_path()
     }
 }
 
-impl<'a> NewDir<'a> {
+impl NewDir<'_> {
     fn at(self, component: &str) -> Result<Self, Error> {
         self.0.push(component);
         create_dir(self.0)?;
@@ -73,13 +71,13 @@ impl<'a> NewDir<'a> {
     }
 }
 
-impl<'a> Drop for NewDir<'a> {
+impl Drop for NewDir<'_> {
     fn drop(&mut self) {
         self.0.pop();
     }
 }
 
-impl<'a> Drop for PathCursor<'a> {
+impl Drop for PathCursor<'_> {
     fn drop(&mut self) {
         self.0.pop();
     }
@@ -89,6 +87,7 @@ fn write_file(data: &[u8], path: &Path) -> Result<(), Error> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .append(false)
         .open(path)
         .map_err(|e| Error::IoOpen {
@@ -115,9 +114,9 @@ pub struct Options {
     ///
     /// By default repos with worktree can be initialized into a non-empty repository as long as there is no `.git` directory.
     pub destination_must_be_empty: bool,
-    /// If set, use these filesystem capabilities to populate the respective gix-config fields.
+    /// If set, use these filesystem capabilities to populate the respective git-config fields.
     /// If `None`, the directory will be probed.
-    pub fs_capabilities: Option<gix_worktree::fs::Capabilities>,
+    pub fs_capabilities: Option<gix_fs::Capabilities>,
 }
 
 /// Create a new `.git` repository of `kind` within the possibly non-existing `directory`
@@ -172,9 +171,8 @@ pub fn into(
     {
         let mut cursor = NewDir(&mut dot_git).at("hooks")?;
         for (tpl, filename) in &[
-            (TPL_HOOKS_UPDATE, "update.sample"),
+            (TPL_HOOKS_DOCS_URL, "docs.url"),
             (TPL_HOOKS_PREPARE_COMMIT_MSG, "prepare-commit-msg.sample"),
-            (TPL_HOOKS_PRE_RECEIVE, "pre-receive.sample"),
             (TPL_HOOKS_PRE_REBASE, "pre-rebase.sample"),
             (TPL_HOOKS_PRE_PUSH, "pre-push.sample"),
             (TPL_HOOKS_PRE_COMMIT, "pre-commit.sample"),
@@ -205,10 +203,10 @@ pub fn into(
         write_file(tpl, PathCursor(&mut dot_git).at(filename))?;
     }
 
-    {
+    let caps = {
         let mut config = gix_config::File::default();
-        {
-            let caps = fs_capabilities.unwrap_or_else(|| gix_worktree::fs::Capabilities::probe(&dot_git));
+        let caps = {
+            let caps = fs_capabilities.unwrap_or_else(|| gix_fs::Capabilities::probe(&dot_git));
             let mut core = config.new_section("core", None).expect("valid section name");
 
             core.push(key("repositoryformatversion"), Some("0".into()));
@@ -218,29 +216,31 @@ pub fn into(
             core.push(key("symlinks"), Some(bool(caps.symlink).into()));
             core.push(key("ignorecase"), Some(bool(caps.ignore_case).into()));
             core.push(key("precomposeunicode"), Some(bool(caps.precompose_unicode).into()));
-        }
+            caps
+        };
         let mut cursor = PathCursor(&mut dot_git);
         let config_path = cursor.at("config");
         std::fs::write(config_path, config.to_bstring()).map_err(|err| Error::IoWrite {
             source: err,
             path: config_path.to_owned(),
         })?;
-    }
+        caps
+    };
 
     Ok(gix_discover::repository::Path::from_dot_git_dir(
         dot_git,
         if bare {
-            gix_discover::repository::Kind::Bare
+            gix_discover::repository::Kind::PossiblyBare
         } else {
             gix_discover::repository::Kind::WorkTree { linked_git_dir: None }
         },
-        std::env::current_dir()?,
+        &gix_fs::current_dir(caps.precompose_unicode)?,
     )
     .expect("by now the `dot_git` dir is valid as we have accessed it"))
 }
 
-fn key(name: &'static str) -> section::Key<'static> {
-    section::Key::try_from(name).expect("valid key name")
+fn key(name: &'static str) -> section::ValueName<'static> {
+    section::ValueName::try_from(name).expect("valid key name")
 }
 
 fn bool(v: bool) -> &'static str {

@@ -4,7 +4,7 @@ use crate::{
     Target,
 };
 
-impl<'s, 'p> Transaction<'s, 'p> {
+impl Transaction<'_, '_> {
     /// Make all [prepared][Transaction::prepare()] permanent and return the performed edits which represent the current
     /// state of the affected refs in the ref store in that instant. Please note that the obtained edits may have been
     /// adjusted to contain more dependent edits or additional information.
@@ -37,7 +37,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
         );
 
         // Perform updates first so live commits remain referenced
-        for change in updates.iter_mut() {
+        for change in &mut updates {
             assert!(!change.update.deref, "Deref mode is turned into splits and turned off");
             match &change.update.change {
                 // reflog first, then reference
@@ -50,18 +50,21 @@ impl<'s, 'p> Transaction<'s, 'p> {
                     if update_reflog {
                         let log_update = match new {
                             Target::Symbolic(_) => {
-                                // no reflog for symref changes, unless the ref is new and we can obtain a peeled id
+                                // Special HACK: no reflog for symref changes as there is no OID involved which the reflog needs.
+                                // Unless, the ref is new and we can obtain a peeled id
                                 // identified by the expectation of what could be there, as is the case when cloning.
                                 match expected {
-                                    PreviousValue::ExistingMustMatch(Target::Peeled(oid)) => {
+                                    PreviousValue::ExistingMustMatch(Target::Object(oid)) => {
                                         Some((Some(gix_hash::ObjectId::null(oid.kind())), oid))
                                     }
                                     _ => None,
                                 }
                             }
-                            Target::Peeled(new_oid) => {
+                            Target::Object(new_oid) => {
                                 let previous = match expected {
-                                    PreviousValue::MustExistAndMatch(Target::Peeled(oid)) => Some(oid.to_owned()),
+                                    // Here, this means that the ref already existed, and that it will receive (even transitively)
+                                    // the given value
+                                    PreviousValue::MustExistAndMatch(Target::Object(oid)) => Some(oid.to_owned()),
                                     _ => None,
                                 }
                                 .or(change.leaf_referent_previous_oid);
@@ -69,7 +72,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
                             }
                         };
                         if let Some((previous, new_oid)) = log_update {
-                            let do_update = previous.as_ref().map_or(true, |previous| previous != new_oid);
+                            let do_update = previous.as_ref() != Some(new_oid);
                             if do_update {
                                 self.store.reflog_create_or_append(
                                     change.update.name.as_ref(),
@@ -85,12 +88,12 @@ impl<'s, 'p> Transaction<'s, 'p> {
                     // Don't do anything else while keeping the lock after potentially updating the reflog.
                     // We delay deletion of the reference and dropping the lock to after the packed-refs were
                     // safely written.
-                    if delete_loose_refs && matches!(new, Target::Peeled(_)) {
+                    if delete_loose_refs && matches!(new, Target::Object(_)) {
                         change.lock = lock;
                         continue;
                     }
                     if update_ref {
-                        if let Some(Err(err)) = lock.map(|l| l.commit()) {
+                        if let Some(Err(err)) = lock.map(gix_lock::Marker::commit) {
                             // TODO: when Kind::IsADirectory becomes stable, use that.
                             let err = if err.instance.resource_path().is_dir() {
                                 gix_tempfile::remove_dir::empty_depth_first(err.instance.resource_path())
@@ -114,7 +117,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
             }
         }
 
-        for change in updates.iter_mut() {
+        for change in &mut updates {
             let (reflog_root, relative_name) = self.store.reflog_base_and_relative_path(change.update.name.as_ref());
             match &change.update.change {
                 Change::Update { .. } => {}
@@ -147,13 +150,13 @@ impl<'s, 'p> Transaction<'s, 'p> {
             self.store.force_refresh_packed_buffer().ok();
         }
 
-        for change in updates.iter_mut() {
+        for change in &mut updates {
             let take_lock_and_delete = match &change.update.change {
                 Change::Update {
                     log: LogChange { mode, .. },
                     new,
                     ..
-                } => delete_loose_refs && *mode == RefLog::AndReference && matches!(new, Target::Peeled(_)),
+                } => delete_loose_refs && *mode == RefLog::AndReference && matches!(new, Target::Object(_)),
                 Change::Delete { log: mode, .. } => *mode == RefLog::AndReference,
             };
             if take_lock_and_delete {
@@ -167,7 +170,7 @@ impl<'s, 'p> Transaction<'s, 'p> {
                         });
                     }
                 }
-                drop(lock)
+                drop(lock);
             }
         }
         Ok(updates.into_iter().map(|edit| edit.update).collect())

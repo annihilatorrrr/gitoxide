@@ -73,8 +73,8 @@ fn corpus() {
         (0,0,0,0, "]", "[!]-]"),
         (1,1,1,1, "a", "[!]-]"),
         (0,0,0,0, "", r"\"),
-        (0,0,1,1, r"XXX/\", r"*/\"),
-        (0,0,1,1, r"XXX/\", r"*/\\"),
+        (0,0,0,0, r"XXX/\", r"*/\"),
+        (1,1,1,1, r"XXX/\", r"*/\\"),
         (1,1,1,1, "foo", "foo"),
         (1,1,1,1, "@foo", "@foo"),
         (0,0,0,0, "foo", "@foo"),
@@ -367,7 +367,13 @@ impl Display for MatchResult {
 }
 
 fn match_file_path(pattern: &gix_glob::Pattern, path: &str, case: Case) -> bool {
-    pattern.matches_repo_relative_path(path, basename_of(path), false.into() /* is_dir */, case)
+    pattern.matches_repo_relative_path(
+        path.into(),
+        basename_of(path),
+        false.into(), /* is_dir */
+        case,
+        gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
+    )
 }
 fn basename_of(path: &str) -> Option<usize> {
     path.rfind('/').map(|pos| pos + 1)

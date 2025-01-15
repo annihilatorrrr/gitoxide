@@ -3,6 +3,7 @@ use std::io::Write;
 use gix_features::hash;
 
 use crate::data::output;
+use crate::exact_vec;
 
 /// The error returned by `next()` in the [`FromEntriesIter`] iterator.
 #[allow(missing_docs)]
@@ -51,7 +52,7 @@ where
     /// `output` writer, resembling a pack of `version` with exactly `num_entries` amount of objects contained in it.
     /// `object_hash` is the kind of hash to use for the pack checksum and maybe other places, depending on the version.
     ///
-    /// The input chunks are expected to be sorted already. You can use the [InOrderIter][gix_features::parallel::InOrderIter] to assure
+    /// The input chunks are expected to be sorted already. You can use the [`InOrderIter`][gix_features::parallel::InOrderIter] to assure
     /// this happens on the fly holding entire chunks in memory as long as needed for them to be dispensed in order.
     ///
     /// # Panics
@@ -73,7 +74,7 @@ where
             output: hash::Write::new(output, object_hash),
             trailer: None,
             entry_version: version,
-            pack_offsets_and_validity: Vec::with_capacity(num_entries as usize),
+            pack_offsets_and_validity: exact_vec(num_entries as usize),
             written: 0,
             header_info: Some((version, num_entries)),
             is_done: false,

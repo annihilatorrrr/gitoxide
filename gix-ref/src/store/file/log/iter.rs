@@ -88,11 +88,11 @@ pub struct Platform<'a, 's> {
     pub buf: Vec<u8>,
 }
 
-impl<'a, 's> Platform<'a, 's> {
+impl Platform<'_, '_> {
     /// Return a forward iterator over all log-lines, most recent to oldest.
     pub fn rev(&mut self) -> std::io::Result<Option<log::iter::Reverse<'_, std::fs::File>>> {
         self.buf.clear();
-        self.buf.resize(512, 0);
+        self.buf.resize(1024 * 4, 0);
         self.store
             .reflog_iter_rev(self.name, &mut self.buf)
             .map_err(must_be_io_err)
@@ -158,7 +158,7 @@ pub mod reverse {
     }
 }
 
-impl<'a, F> Iterator for Reverse<'a, F>
+impl<F> Iterator for Reverse<'_, F>
 where
     F: std::io::Read + std::io::Seek,
 {
@@ -219,7 +219,7 @@ where
                         if npos == last_read_pos {
                             return Some(Err(std::io::Error::new(
                                 std::io::ErrorKind::Other,
-                                "buffer too small for line size",
+                                format!("buffer too small for line size, got until {:?}", self.buf.as_bstr()),
                             )
                             .into()));
                         }

@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicBool;
 
-use gix_features::{parallel, progress::Progress};
+use gix_features::{parallel, progress::Progress, zlib};
 
 use crate::index;
 
@@ -13,6 +13,7 @@ use reduce::Reducer;
 
 mod error;
 pub use error::Error;
+use gix_features::progress::DynNestedProgress;
 
 mod types;
 pub use types::{Algorithm, ProgressId, SafetyCheck, Statistics};
@@ -43,13 +44,11 @@ impl Default for Options<fn() -> crate::cache::Never> {
 }
 
 /// The outcome of the [`traverse()`][index::File::traverse()] method.
-pub struct Outcome<P> {
+pub struct Outcome {
     /// The checksum obtained when hashing the file, which matched the checksum contained within the file.
     pub actual_index_checksum: gix_hash::ObjectId,
     /// The statistics obtained during traversal.
     pub statistics: Statistics,
-    /// The input progress to allow reuse.
-    pub progress: P,
 }
 
 /// Traversal of pack data files using an index file
@@ -74,34 +73,28 @@ impl index::File {
     ///
     /// Use [`thread_limit`][Options::thread_limit] to further control parallelism and [`check`][SafetyCheck] to define how much the passed
     /// objects shall be verified beforehand.
-    pub fn traverse<P, C, Processor, E, F>(
+    pub fn traverse<C, Processor, E, F>(
         &self,
         pack: &crate::data::File,
-        progress: P,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
-        new_processor: impl Fn() -> Processor + Send + Clone,
+        processor: Processor,
         Options {
             traversal,
             thread_limit,
             check,
             make_pack_lookup_cache,
         }: Options<F>,
-    ) -> Result<Outcome<P>, Error<E>>
+    ) -> Result<Outcome, Error<E>>
     where
-        P: Progress,
         C: crate::cache::DecodeEntry,
         E: std::error::Error + Send + Sync + 'static,
-        Processor: FnMut(
-            gix_object::Kind,
-            &[u8],
-            &index::Entry,
-            &mut <P::SubProgress as Progress>::SubProgress,
-        ) -> Result<(), E>,
+        Processor: FnMut(gix_object::Kind, &[u8], &index::Entry, &dyn Progress) -> Result<(), E> + Send + Clone,
         F: Fn() -> C + Send + Clone,
     {
         match traversal {
             Algorithm::Lookup => self.traverse_with_lookup(
-                new_processor,
+                processor,
                 pack,
                 progress,
                 should_interrupt,
@@ -113,10 +106,10 @@ impl index::File {
             ),
             Algorithm::DeltaTreeLookup => self.traverse_with_index(
                 pack,
-                new_processor,
+                processor,
                 progress,
                 should_interrupt,
-                crate::index::traverse::with_index::Options { check, thread_limit },
+                with_index::Options { check, thread_limit },
             ),
         }
     }
@@ -125,8 +118,8 @@ impl index::File {
         &self,
         pack: &crate::data::File,
         check: SafetyCheck,
-        pack_progress: impl Progress,
-        index_progress: impl Progress,
+        pack_progress: &mut dyn Progress,
+        index_progress: &mut dyn Progress,
         should_interrupt: &AtomicBool,
     ) -> Result<gix_hash::ObjectId, Error<E>>
     where
@@ -151,31 +144,33 @@ impl index::File {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn decode_and_process_entry<C, P, E>(
+    fn decode_and_process_entry<C, E>(
         &self,
         check: SafetyCheck,
         pack: &crate::data::File,
         cache: &mut C,
         buf: &mut Vec<u8>,
-        progress: &mut P,
-        index_entry: &crate::index::Entry,
-        processor: &mut impl FnMut(gix_object::Kind, &[u8], &index::Entry, &mut P) -> Result<(), E>,
+        inflate: &mut zlib::Inflate,
+        progress: &mut dyn Progress,
+        index_entry: &index::Entry,
+        processor: &mut impl FnMut(gix_object::Kind, &[u8], &index::Entry, &dyn Progress) -> Result<(), E>,
     ) -> Result<crate::data::decode::entry::Outcome, Error<E>>
     where
         C: crate::cache::DecodeEntry,
-        P: Progress,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let pack_entry = pack.entry(index_entry.pack_offset);
+        let pack_entry = pack.entry(index_entry.pack_offset)?;
         let pack_entry_data_offset = pack_entry.data_offset;
         let entry_stats = pack
             .decode_entry(
                 pack_entry,
                 buf,
-                |id, _| {
-                    self.lookup(id).map(|index| {
-                        crate::data::decode::entry::ResolvedBase::InPack(pack.entry(self.pack_offset_at_index(index)))
-                    })
+                inflate,
+                &|id, _| {
+                    let index = self.lookup(id)?;
+                    pack.entry(self.pack_offset_at_index(index))
+                        .ok()
+                        .map(crate::data::decode::entry::ResolvedBase::InPack)
                 },
                 cache,
             )
@@ -192,9 +187,9 @@ impl index::File {
             check,
             object_kind,
             buf,
-            progress,
             index_entry,
             || pack.entry_crc32(index_entry.pack_offset, entry_len),
+            progress,
             processor,
         )?;
         Ok(entry_stats)
@@ -202,25 +197,20 @@ impl index::File {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_entry<P, E>(
+fn process_entry<E>(
     check: SafetyCheck,
     object_kind: gix_object::Kind,
     decompressed: &[u8],
-    progress: &mut P,
-    index_entry: &crate::index::Entry,
+    index_entry: &index::Entry,
     pack_entry_crc32: impl FnOnce() -> u32,
-    processor: &mut impl FnMut(gix_object::Kind, &[u8], &index::Entry, &mut P) -> Result<(), E>,
+    progress: &dyn Progress,
+    processor: &mut impl FnMut(gix_object::Kind, &[u8], &index::Entry, &dyn Progress) -> Result<(), E>,
 ) -> Result<(), Error<E>>
 where
-    P: Progress,
     E: std::error::Error + Send + Sync + 'static,
 {
     if check.object_checksum() {
-        let mut hasher = gix_features::hash::hasher(index_entry.oid.kind());
-        hasher.update(&gix_object::encode::loose_header(object_kind, decompressed.len()));
-        hasher.update(decompressed);
-
-        let actual_oid = gix_hash::ObjectId::from(hasher.digest());
+        let actual_oid = gix_object::compute_hash(index_entry.oid.kind(), object_kind, decompressed);
         if actual_oid != index_entry.oid {
             return Err(Error::PackObjectMismatch {
                 actual: actual_oid,

@@ -73,12 +73,11 @@ where
         }
         self.num_entries += 1;
         entry.header.write_to(entry.decompressed_size, &mut self.output)?;
-        std::io::copy(
-            &mut entry
+        self.output.write_all(
+            entry
                 .compressed
                 .as_deref()
                 .expect("caller must configure generator to keep compressed bytes"),
-            &mut self.output,
         )?;
         Ok(entry)
     }
@@ -98,7 +97,7 @@ where
         let interrupt_never = std::sync::atomic::AtomicBool::new(false);
         let digest = hash::bytes(
             &mut self.output,
-            num_bytes_written as usize,
+            num_bytes_written,
             self.object_hash,
             &mut gix_features::progress::Discard,
             &interrupt_never,

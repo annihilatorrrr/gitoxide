@@ -1,19 +1,21 @@
 //!
+#![allow(clippy::empty_docs)]
 use std::path::Path;
 
-use gix_odb::pack::Find;
 use gix_ref::file::ReferenceExt;
 
 /// A platform to create iterators over references.
 #[must_use = "Iterators should be obtained from this iterator platform"]
 pub struct Platform<'r> {
     pub(crate) platform: gix_ref::file::iter::Platform<'r>,
-    pub(crate) repo: &'r crate::Repository,
+    /// The owning repository.
+    pub repo: &'r crate::Repository,
 }
 
 /// An iterator over references, with or without filter.
 pub struct Iter<'r> {
     inner: gix_ref::file::iter::LooseThenPacked<'r, 'r>,
+    peel_with_packed: Option<gix_ref::file::packed::SharedBufferSnapshot>,
     peel: bool,
     repo: &'r crate::Repository,
 }
@@ -22,13 +24,14 @@ impl<'r> Iter<'r> {
     fn new(repo: &'r crate::Repository, platform: gix_ref::file::iter::LooseThenPacked<'r, 'r>) -> Self {
         Iter {
             inner: platform,
+            peel_with_packed: None,
             peel: false,
             repo,
         }
     }
 }
 
-impl<'r> Platform<'r> {
+impl Platform<'_> {
     /// Return an iterator over all references in the repository.
     ///
     /// Even broken or otherwise unparsable or inaccessible references are returned and have to be handled by the caller on a
@@ -43,7 +46,7 @@ impl<'r> Platform<'r> {
     // TODO: Create a custom `Path` type that enforces the requirements of git naturally, this type is surprising possibly on windows
     //       and when not using a trailing '/' to signal directories.
     pub fn prefixed(&self, prefix: impl AsRef<Path>) -> Result<Iter<'_>, init::Error> {
-        Ok(Iter::new(self.repo, self.platform.prefixed(prefix)?))
+        Ok(Iter::new(self.repo, self.platform.prefixed(prefix.as_ref())?))
     }
 
     // TODO: tests
@@ -51,7 +54,7 @@ impl<'r> Platform<'r> {
     ///
     /// They are all prefixed with `refs/tags`.
     pub fn tags(&self) -> Result<Iter<'_>, init::Error> {
-        Ok(Iter::new(self.repo, self.platform.prefixed("refs/tags/")?))
+        Ok(Iter::new(self.repo, self.platform.prefixed("refs/tags/".as_ref())?))
     }
 
     // TODO: tests
@@ -59,7 +62,7 @@ impl<'r> Platform<'r> {
     ///
     /// They are all prefixed with `refs/heads`.
     pub fn local_branches(&self) -> Result<Iter<'_>, init::Error> {
-        Ok(Iter::new(self.repo, self.platform.prefixed("refs/heads/")?))
+        Ok(Iter::new(self.repo, self.platform.prefixed("refs/heads/".as_ref())?))
     }
 
     // TODO: tests
@@ -67,11 +70,11 @@ impl<'r> Platform<'r> {
     ///
     /// They are all prefixed with `refs/remotes`.
     pub fn remote_branches(&self) -> Result<Iter<'_>, init::Error> {
-        Ok(Iter::new(self.repo, self.platform.prefixed("refs/remotes/")?))
+        Ok(Iter::new(self.repo, self.platform.prefixed("refs/remotes/".as_ref())?))
     }
 }
 
-impl<'r> Iter<'r> {
+impl Iter<'_> {
     /// Automatically peel references before yielding them during iteration.
     ///
     /// This has the same effect as using `iter.map(|r| {r.peel_to_id_in_place(); r})`.
@@ -80,9 +83,10 @@ impl<'r> Iter<'r> {
     ///
     /// Doing this is necessary as the packed-refs buffer is already held by the iterator, disallowing the consumer of the iterator
     /// to peel the returned references themselves.
-    pub fn peeled(mut self) -> Self {
+    pub fn peeled(mut self) -> Result<Self, gix_ref::packed::buffer::open::Error> {
+        self.peel_with_packed = self.repo.refs.cached_packed_buffer()?;
         self.peel = true;
-        self
+        Ok(self)
     }
 }
 
@@ -94,13 +98,12 @@ impl<'r> Iterator for Iter<'r> {
             res.map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync + 'static>)
                 .and_then(|mut r| {
                     if self.peel {
-                        let handle = &self.repo;
-                        r.peel_to_id_in_place(&handle.refs, |oid, buf| {
-                            handle
-                                .objects
-                                .try_find(oid, buf)
-                                .map(|po| po.map(|(o, _l)| (o.kind, o.data)))
-                        })
+                        let repo = &self.repo;
+                        r.peel_to_id_in_place_packed(
+                            &repo.refs,
+                            &repo.objects,
+                            self.peel_with_packed.as_ref().map(|p| &***p),
+                        )
                         .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync + 'static>)
                         .map(|_| r)
                     } else {

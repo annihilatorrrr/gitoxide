@@ -13,14 +13,18 @@ pub(in crate::store_impl::file) struct SortedLoosePaths {
 }
 
 impl SortedLoosePaths {
-    pub fn at(path: impl AsRef<Path>, base: impl Into<PathBuf>, filename_prefix: Option<BString>) -> Self {
-        let path = path.as_ref();
+    pub fn at(path: &Path, base: PathBuf, filename_prefix: Option<BString>, precompose_unicode: bool) -> Self {
         SortedLoosePaths {
-            base: base.into(),
+            base,
             filename_prefix,
             file_walk: path.is_dir().then(|| {
                 // serial iteration as we expect most refs in packed-refs anyway.
-                gix_features::fs::walkdir_sorted_new(path, gix_features::fs::walkdir::Parallelism::Serial).into_iter()
+                gix_features::fs::walkdir_sorted_new(
+                    path,
+                    gix_features::fs::walkdir::Parallelism::Serial,
+                    precompose_unicode,
+                )
+                .into_iter()
             }),
         }
     }
@@ -33,10 +37,10 @@ impl Iterator for SortedLoosePaths {
         for entry in self.file_walk.as_mut()?.by_ref() {
             match entry {
                 Ok(entry) => {
-                    if !entry.file_type().is_file() {
+                    if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
                         continue;
                     }
-                    let full_path = entry.path().to_owned();
+                    let full_path = entry.path().into_owned();
                     if let Some((prefix, name)) = self
                         .filename_prefix
                         .as_deref()
@@ -89,7 +93,7 @@ impl file::Store {
     /// Return an iterator over all loose references that start with the given `prefix`.
     ///
     /// Otherwise it's similar to [`loose_iter()`][file::Store::loose_iter()].
-    pub fn loose_iter_prefixed(&self, prefix: impl AsRef<Path>) -> std::io::Result<LooseThenPacked<'_, '_>> {
+    pub fn loose_iter_prefixed(&self, prefix: &Path) -> std::io::Result<LooseThenPacked<'_, '_>> {
         self.iter_prefixed_packed(prefix, None)
     }
 }

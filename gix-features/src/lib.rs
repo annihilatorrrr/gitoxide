@@ -8,10 +8,10 @@
 //! counterparts with higher performance.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 ///
@@ -27,6 +27,8 @@ pub mod parallel;
 #[cfg(feature = "progress")]
 pub mod progress;
 pub mod threading;
+pub use gix_trace as trace;
+
 ///
 #[cfg(feature = "zlib")]
 pub mod zlib;

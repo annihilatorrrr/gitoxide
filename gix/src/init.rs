@@ -1,5 +1,5 @@
 #![allow(clippy::result_large_err)]
-use std::{borrow::Cow, convert::TryInto, path::Path};
+use std::{borrow::Cow, path::Path};
 
 use gix_ref::{
     store::WriteReflog,
@@ -29,7 +29,7 @@ pub enum Error {
     #[error("Invalid default branch name: {name:?}")]
     InvalidBranchName {
         name: BString,
-        source: gix_validate::refname::Error,
+        source: gix_validate::reference::name::Error,
     },
     #[error("Could not edit HEAD reference with new default name")]
     EditHeadForDefaultBranch(#[from] crate::reference::edit::Error),
@@ -65,13 +65,14 @@ impl ThreadSafeRepository {
         let path = crate::create::into(directory.as_ref(), kind, create_options)?;
         let (git_dir, worktree_dir) = path.into_repository_and_work_tree_directories();
         open_options.git_dir_trust = Some(gix_sec::Trust::Full);
-        open_options.current_dir = std::env::current_dir()?.into();
+        // The repo will use `core.precomposeUnicode` to adjust the value as needed.
+        open_options.current_dir = gix_fs::current_dir(false)?.into();
         let repo = ThreadSafeRepository::open_from_paths(git_dir, worktree_dir, open_options)?;
 
         let branch_name = repo
             .config
             .resolved
-            .string("init", None, Init::DEFAULT_BRANCH.name)
+            .string(Init::DEFAULT_BRANCH)
             .unwrap_or_else(|| Cow::Borrowed(DEFAULT_BRANCH_NAME.into()));
         if branch_name.as_ref() != DEFAULT_BRANCH_NAME {
             let sym_ref: FullName =

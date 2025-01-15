@@ -2,13 +2,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gix_features::{
     parallel::{self, in_parallel_if},
-    progress::{self, unit, Progress},
+    progress::{self, Count, DynNestedProgress, Progress},
     threading::{lock, Mutable, OwnShared},
+    zlib,
 };
 
 use super::{Error, Reducer};
 use crate::{
-    data, index,
+    data, exact_vec, index,
     index::{traverse::Outcome, util},
 };
 
@@ -65,40 +66,34 @@ impl index::File {
     /// waste while decoding objects.
     ///
     /// For more details, see the documentation on the [`traverse()`][index::File::traverse()] method.
-    pub fn traverse_with_lookup<P, C, Processor, E, F>(
+    pub fn traverse_with_lookup<C, Processor, E, F>(
         &self,
-        new_processor: impl Fn() -> Processor + Send + Clone,
-        pack: &crate::data::File,
-        mut progress: P,
+        mut processor: Processor,
+        pack: &data::File,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
         Options {
             thread_limit,
             check,
             make_pack_lookup_cache,
         }: Options<F>,
-    ) -> Result<Outcome<P>, Error<E>>
+    ) -> Result<Outcome, Error<E>>
     where
-        P: Progress,
         C: crate::cache::DecodeEntry,
         E: std::error::Error + Send + Sync + 'static,
-        Processor: FnMut(
-            gix_object::Kind,
-            &[u8],
-            &index::Entry,
-            &mut <P::SubProgress as Progress>::SubProgress,
-        ) -> Result<(), E>,
+        Processor: FnMut(gix_object::Kind, &[u8], &index::Entry, &dyn Progress) -> Result<(), E> + Send + Clone,
         F: Fn() -> C + Send + Clone,
     {
         let (verify_result, traversal_result) = parallel::join(
             {
-                let pack_progress = progress.add_child_with_id(
+                let mut pack_progress = progress.add_child_with_id(
                     format!(
                         "Hash of pack '{}'",
                         pack.path().file_name().expect("pack has filename").to_string_lossy()
                     ),
                     ProgressId::HashPackDataBytes.into(),
                 );
-                let index_progress = progress.add_child_with_id(
+                let mut index_progress = progress.add_child_with_id(
                     format!(
                         "Hash of index '{}'",
                         self.path.file_name().expect("index has filename").to_string_lossy()
@@ -106,7 +101,8 @@ impl index::File {
                     ProgressId::HashPackIndexBytes.into(),
                 );
                 move || {
-                    let res = self.possibly_verify(pack, check, pack_progress, index_progress, should_interrupt);
+                    let res =
+                        self.possibly_verify(pack, check, &mut pack_progress, &mut index_progress, should_interrupt);
                     if res.is_err() {
                         should_interrupt.store(true, Ordering::SeqCst);
                     }
@@ -116,15 +112,18 @@ impl index::File {
             || {
                 let index_entries = util::index_entries_sorted_by_offset_ascending(
                     self,
-                    progress.add_child_with_id("collecting sorted index", ProgressId::CollectSortedIndexEntries.into()),
+                    &mut progress.add_child_with_id(
+                        "collecting sorted index".into(),
+                        ProgressId::CollectSortedIndexEntries.into(),
+                    ),
                 );
 
                 let (chunk_size, thread_limit, available_cores) =
                     parallel::optimize_chunk_size_and_thread_limit(1000, Some(index_entries.len()), thread_limit, None);
                 let there_are_enough_entries_to_process = || index_entries.len() > chunk_size * available_cores;
-                let input_chunks = index_entries.chunks(chunk_size.max(chunk_size));
+                let input_chunks = index_entries.chunks(chunk_size);
                 let reduce_progress = OwnShared::new(Mutable::new({
-                    let mut p = progress.add_child_with_id("Traversing", ProgressId::DecodedObjects.into());
+                    let mut p = progress.add_child_with_id("Traversing".into(), ProgressId::DecodedObjects.into());
                     p.init(Some(self.num_objects() as usize), progress::count("objects"));
                     p
                 }));
@@ -133,8 +132,8 @@ impl index::File {
                     move |index| {
                         (
                             make_pack_lookup_cache(),
-                            new_processor(),
                             Vec::with_capacity(2048), // decode buffer
+                            zlib::Inflate::default(),
                             lock(&reduce_progress)
                                 .add_child_with_id(format!("thread {index}"), gix_features::progress::UNKNOWN), // per thread progress
                         )
@@ -146,17 +145,14 @@ impl index::File {
                     input_chunks,
                     thread_limit,
                     state_per_thread,
-                    |entries: &[index::Entry],
-                     (cache, ref mut processor, buf, progress)|
-                     -> Result<Vec<data::decode::entry::Outcome>, Error<_>> {
+                    move |entries: &[index::Entry],
+                          (cache, buf, inflate, progress)|
+                          -> Result<Vec<data::decode::entry::Outcome>, Error<_>> {
                         progress.init(
                             Some(entries.len()),
-                            Some(unit::dynamic(unit::Human::new(
-                                unit::human::Formatter::new(),
-                                "objects",
-                            ))),
+                            gix_features::progress::count_with_decimals("objects", 2),
                         );
-                        let mut stats = Vec::with_capacity(entries.len());
+                        let mut stats = exact_vec(entries.len());
                         progress.set(0);
                         for index_entry in entries.iter() {
                             let result = self.decode_and_process_entry(
@@ -164,9 +160,10 @@ impl index::File {
                                 pack,
                                 cache,
                                 buf,
+                                inflate,
                                 progress,
                                 index_entry,
-                                processor,
+                                &mut processor,
                             );
                             progress.inc();
                             let stat = match result {
@@ -177,6 +174,9 @@ impl index::File {
                                 res => res,
                             }?;
                             stats.push(stat);
+                            if should_interrupt.load(Ordering::Relaxed) {
+                                break;
+                            }
                         }
                         Ok(stats)
                     },
@@ -187,7 +187,6 @@ impl index::File {
         Ok(Outcome {
             actual_index_checksum: verify_result?,
             statistics: traversal_result?,
-            progress,
         })
     }
 }

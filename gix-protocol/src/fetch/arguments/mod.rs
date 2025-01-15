@@ -23,6 +23,9 @@ pub struct Arguments {
     features_for_first_want: Option<Vec<String>>,
     #[cfg(any(feature = "async-client", feature = "blocking-client"))]
     version: gix_transport::Protocol,
+
+    #[cfg(any(feature = "async-client", feature = "blocking-client"))]
+    trace: bool,
 }
 
 impl Arguments {
@@ -49,20 +52,20 @@ impl Arguments {
     pub fn can_use_deepen(&self) -> bool {
         self.shallow
     }
-    /// Return true if the 'deepen_since' capability is supported.
+    /// Return true if the '`deepen_since`' capability is supported.
     ///
     /// This is relevant for partial clones when using `--depth X` and retrieving additional history
     /// based on a date beyond which all history should be present.
     pub fn can_use_deepen_since(&self) -> bool {
         self.deepen_since
     }
-    /// Return true if the 'deepen_not' capability is supported.
+    /// Return true if the '`deepen_not`' capability is supported.
     ///
     /// This is relevant for partial clones when using `--depth X`.
     pub fn can_use_deepen_not(&self) -> bool {
         self.deepen_not
     }
-    /// Return true if the 'deepen_relative' capability is supported.
+    /// Return true if the '`deepen_relative`' capability is supported.
     ///
     /// This is relevant for partial clones when using `--depth X`.
     pub fn can_use_deepen_relative(&self) -> bool {
@@ -77,6 +80,18 @@ impl Arguments {
     /// Return true if the 'include-tag' capability is supported.
     pub fn can_use_include_tag(&self) -> bool {
         self.supports_include_tag
+    }
+    /// Return true if we will use a stateless mode of operation, which can be decided in conjunction with `transport_is_stateless`.
+    ///
+    /// * we are always stateless if the transport is stateless, i.e. doesn't support multiple interactions with a single connection.
+    /// * we are always stateless if the protocol version is `2`
+    /// * otherwise we may be stateful.
+    pub fn is_stateless(&self, transport_is_stateless: bool) -> bool {
+        #[cfg(any(feature = "async-client", feature = "blocking-client"))]
+        let res = transport_is_stateless || self.version == gix_transport::Protocol::V2;
+        #[cfg(not(any(feature = "async-client", feature = "blocking-client")))]
+        let res = transport_is_stateless;
+        res
     }
 
     /// Add the given `id` pointing to a commit to the 'want' list.
@@ -117,11 +132,11 @@ impl Arguments {
             self.prefixed("deepen ", depth);
         }
     }
-    /// Deepen the commit history to include all commits from now to `seconds_since_unix_epoch`.
-    pub fn deepen_since(&mut self, seconds_since_unix_epoch: usize) {
+    /// Deepen the commit history to include all commits from now to (and including) `seconds` as passed since UNIX epoch.
+    pub fn deepen_since(&mut self, seconds: gix_date::SecondsSinceUnixEpoch) {
         debug_assert!(self.deepen_since, "'deepen-since' feature required");
         if self.deepen_since {
-            self.prefixed("deepen-since ", seconds_since_unix_epoch);
+            self.prefixed("deepen-since ", seconds);
         }
     }
     /// Deepen the commit history in a relative instead of absolute fashion.
@@ -150,19 +165,43 @@ impl Arguments {
     /// Permanently allow the server to include tags that point to commits or objects it would return.
     ///
     /// Needs to only be called once.
+    #[cfg(any(feature = "async-client", feature = "blocking-client"))]
     pub fn use_include_tag(&mut self) {
         debug_assert!(self.supports_include_tag, "'include-tag' feature required");
         if self.supports_include_tag {
-            self.args.push("include-tag".into());
+            self.add_feature("include-tag");
         }
     }
+
+    /// Add the given `feature`, unconditionally.
+    ///
+    /// Note that sending an unknown or unsupported feature may cause the remote to terminate
+    /// the connection. Use this method if you know what you are doing *and* there is no specialized
+    /// method for this, e.g. [`Self::use_include_tag()`].
+    #[cfg(any(feature = "async-client", feature = "blocking-client"))]
+    pub fn add_feature(&mut self, feature: &str) {
+        match self.version {
+            gix_transport::Protocol::V0 | gix_transport::Protocol::V1 => {
+                let features = self
+                    .features_for_first_want
+                    .as_mut()
+                    .expect("call add_feature before first want()");
+                features.push(feature.into());
+            }
+            gix_transport::Protocol::V2 => {
+                self.args.push(feature.into());
+            }
+        }
+    }
+
     fn prefixed(&mut self, prefix: &str, value: impl fmt::Display) {
         self.args.push(format!("{prefix}{value}").into());
     }
     /// Create a new instance to help setting up arguments to send to the server as part of a `fetch` operation
     /// for which `features` are the available and configured features to use.
+    /// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
     #[cfg(any(feature = "async-client", feature = "blocking-client"))]
-    pub fn new(version: gix_transport::Protocol, features: Vec<crate::command::Feature>) -> Self {
+    pub fn new(version: gix_transport::Protocol, features: Vec<crate::command::Feature>, trace: bool) -> Self {
         use crate::Command;
         let has = |name: &str| features.iter().any(|f| f.0 == name);
         let filter = has("filter");
@@ -173,13 +212,16 @@ impl Arguments {
         let mut deepen_relative = shallow;
         let supports_include_tag;
         let (initial_arguments, features_for_first_want) = match version {
-            gix_transport::Protocol::V1 => {
+            gix_transport::Protocol::V0 | gix_transport::Protocol::V1 => {
                 deepen_since = has("deepen-since");
                 deepen_not = has("deepen-not");
                 deepen_relative = has("deepen-relative");
                 supports_include_tag = has("include-tag");
                 let baked_features = features
                     .iter()
+                    .filter(
+                        |(f, _)| *f != "include-tag", /* not a capability in that sense, needs to be turned on by caller later */
+                    )
                     .map(|(n, v)| match v {
                         Some(v) => format!("{n}={v}"),
                         None => n.to_string(),
@@ -189,7 +231,7 @@ impl Arguments {
             }
             gix_transport::Protocol::V2 => {
                 supports_include_tag = true;
-                (Command::Fetch.initial_arguments(&features), None)
+                (Command::Fetch.initial_v2_arguments(&features), None)
             }
         };
 
@@ -206,6 +248,7 @@ impl Arguments {
             ref_in_want,
             deepen_since,
             features_for_first_want,
+            trace,
         }
     }
 }

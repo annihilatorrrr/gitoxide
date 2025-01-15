@@ -6,7 +6,7 @@ use futures_lite::AsyncReadExt;
 
 use crate::{
     decode,
-    read::{ExhaustiveOutcome, WithSidebands},
+    read::{ExhaustiveOutcome, ProgressAction, WithSidebands},
     PacketLineRef, StreamingPeekableIter, MAX_LINE_LEN, U16_HEX_BYTES,
 };
 
@@ -37,21 +37,39 @@ where
     }
 
     /// This function is needed to help the borrow checker allow us to return references all the time
-    /// It contains a bunch of logic shared between peek and read_line invocations.
+    /// It contains a bunch of logic shared between peek and `read_line` invocations.
     async fn read_line_inner_exhaustive<'a>(
         reader: &mut T,
         buf: &'a mut Vec<u8>,
         delimiters: &[PacketLineRef<'static>],
         fail_on_err_lines: bool,
         buf_resize: bool,
+        trace: bool,
     ) -> ExhaustiveOutcome<'a> {
         (
             false,
             None,
             Some(match Self::read_line_inner(reader, buf).await {
                 Ok(Ok(line)) => {
+                    if trace {
+                        match line {
+                            #[allow(unused_variables)]
+                            PacketLineRef::Data(d) => {
+                                gix_trace::trace!("<< {}", d.as_bstr().trim().as_bstr());
+                            }
+                            PacketLineRef::Flush => {
+                                gix_trace::trace!("<< FLUSH");
+                            }
+                            PacketLineRef::Delimiter => {
+                                gix_trace::trace!("<< DELIM");
+                            }
+                            PacketLineRef::ResponseEnd => {
+                                gix_trace::trace!("<< RESPONSE_END");
+                            }
+                        }
+                    }
                     if delimiters.contains(&line) {
-                        let stopped_at = delimiters.iter().find(|l| **l == line).cloned();
+                        let stopped_at = delimiters.iter().find(|l| **l == line).copied();
                         buf.clear();
                         return (true, stopped_at, None);
                     } else if fail_on_err_lines {
@@ -68,10 +86,7 @@ where
                             );
                         }
                     }
-                    let len = line
-                        .as_slice()
-                        .map(|s| s.len() + U16_HEX_BYTES)
-                        .unwrap_or(U16_HEX_BYTES);
+                    let len = line.as_slice().map_or(U16_HEX_BYTES, |s| s.len() + U16_HEX_BYTES);
                     if buf_resize {
                         buf.resize(len, 0);
                     }
@@ -114,6 +129,7 @@ where
                 self.delimiters,
                 self.fail_on_err_lines,
                 false,
+                self.trace,
             )
             .await;
             self.is_done = is_done;
@@ -122,7 +138,8 @@ where
         }
     }
 
-    /// Peek the next packet line without consuming it.
+    /// Peek the next packet line without consuming it. Returns `None` if a stop-packet or an error
+    /// was encountered.
     ///
     /// Multiple calls to peek will return the same packet line, if there is one.
     pub async fn peek_line(&mut self) -> Option<io::Result<Result<PacketLineRef<'_>, decode::Error>>> {
@@ -137,6 +154,7 @@ where
                 self.delimiters,
                 self.fail_on_err_lines,
                 true,
+                self.trace,
             )
             .await;
             self.is_done = is_done;
@@ -150,7 +168,8 @@ where
     /// Same as [`as_read_with_sidebands(…)`][StreamingPeekableIter::as_read_with_sidebands()], but for channels without side band support.
     ///
     /// Due to the preconfigured function type this method can be called without 'turbofish'.
-    pub fn as_read(&mut self) -> WithSidebands<'_, T, fn(bool, &[u8])> {
+    #[allow(clippy::type_complexity)]
+    pub fn as_read(&mut self) -> WithSidebands<'_, T, fn(bool, &[u8]) -> ProgressAction> {
         WithSidebands::new(self)
     }
 
@@ -161,7 +180,7 @@ where
     /// being true in case the `text` is to be interpreted as error.
     ///
     /// _Please note_ that side bands need to be negotiated with the server.
-    pub fn as_read_with_sidebands<F: FnMut(bool, &[u8]) + Unpin>(
+    pub fn as_read_with_sidebands<F: FnMut(bool, &[u8]) -> ProgressAction + Unpin>(
         &mut self,
         handle_progress: F,
     ) -> WithSidebands<'_, T, F> {
@@ -172,7 +191,9 @@ where
     ///
     /// The type parameter `F` needs to be configured for this method to be callable using the 'turbofish' operator.
     /// Use [`as_read()`][StreamingPeekableIter::as_read()].
-    pub fn as_read_without_sidebands<F: FnMut(bool, &[u8]) + Unpin>(&mut self) -> WithSidebands<'_, T, F> {
+    pub fn as_read_without_sidebands<F: FnMut(bool, &[u8]) -> ProgressAction + Unpin>(
+        &mut self,
+    ) -> WithSidebands<'_, T, F> {
         WithSidebands::without_progress_handler(self)
     }
 }

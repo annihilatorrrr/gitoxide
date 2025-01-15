@@ -1,4 +1,4 @@
-use std::{convert::TryInto, io::Read, path::PathBuf};
+use std::{io::Read, path::PathBuf};
 
 use crate::{
     store_impl::{file, file::log},
@@ -134,7 +134,7 @@ pub mod create_or_update {
                         Err(err) => {
                             // TODO: when Kind::IsADirectory becomes stable, use that.
                             if log_path.is_dir() {
-                                gix_tempfile::remove_dir::empty_depth_first(&log_path)
+                                gix_tempfile::remove_dir::empty_depth_first(log_path.clone())
                                     .and_then(|_| options.open(&log_path))
                                     .map(Some)
                                     .map_err(|_| Error::Append {
@@ -231,7 +231,7 @@ pub mod create_or_update {
 }
 
 mod error {
-    /// The error returned by [crate::file::Store::reflog_iter()].
+    /// The error returned by [`crate::file::Store::reflog_iter()`].
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {

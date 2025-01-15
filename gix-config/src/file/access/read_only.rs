@@ -1,34 +1,33 @@
-use std::{borrow::Cow, convert::TryFrom};
+use std::borrow::Cow;
 
 use bstr::{BStr, ByteSlice};
 use gix_features::threading::OwnShared;
 use smallvec::SmallVec;
 
 use crate::{
-    file,
     file::{
+        self,
         write::{extract_newline, platform_newline},
-        Metadata, MetadataFilter, SectionId,
+        Metadata, SectionId,
     },
     lookup,
     parse::Event,
-    File,
+    AsKey, File,
 };
 
 /// Read-only low-level access methods, as it requires generics for converting into
-/// custom values defined in this crate like [`Integer`][crate::Integer] and
-/// [`Color`][crate::Color].
+/// custom values defined in this crate like [`Integer`](crate::Integer) and
+/// [`Color`](crate::Color).
 impl<'event> File<'event> {
-    /// Returns an interpreted value given a section, an optional subsection and
-    /// key.
+    /// Returns an interpreted value given a `key`.
     ///
     /// It's recommended to use one of the value types provide dby this crate
     /// as they implement the conversion, but this function is flexible and
-    /// will accept any type that implements [`TryFrom<&BStr>`][std::convert::TryFrom].
+    /// will accept any type that implements [`TryFrom<&BStr>`](TryFrom).
     ///
     /// Consider [`Self::values`] if you want to get all values of a multivar instead.
     ///
-    /// If a `string` is desired, use the [`string()`][Self::string()] method instead.
+    /// If a `string` is desired, use the [`string()`](Self::string()) method instead.
     ///
     /// # Examples
     ///
@@ -42,43 +41,87 @@ impl<'event> File<'event> {
     ///         a = 10k
     ///         c = false
     /// "#;
-    /// let gix_config = gix_config::File::try_from(config)?;
+    /// let git_config = gix_config::File::try_from(config)?;
     /// // You can either use the turbofish to determine the type...
-    /// let a_value = gix_config.value::<Integer>("core", None, "a")?;
+    /// let a_value = git_config.value::<Integer>("core.a")?;
     /// // ... or explicitly declare the type to avoid the turbofish
-    /// let c_value: Boolean = gix_config.value("core", None, "c")?;
+    /// let c_value: Boolean = git_config.value("core.c")?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn value<'a, T: TryFrom<Cow<'a, BStr>>>(
-        &'a self,
-        section_name: &str,
-        subsection_name: Option<&BStr>,
-        key: &str,
-    ) -> Result<T, lookup::Error<T::Error>> {
-        T::try_from(self.raw_value(section_name, subsection_name, key)?).map_err(lookup::Error::FailedConversion)
+    pub fn value<'a, T: TryFrom<Cow<'a, BStr>>>(&'a self, key: impl AsKey) -> Result<T, lookup::Error<T::Error>> {
+        let key = key.as_key();
+        self.value_by(key.section_name, key.subsection_name, key.value_name)
     }
 
-    /// Like [`value()`][File::value()], but returning an `None` if the value wasn't found at `section[.subsection].key`
-    pub fn try_value<'a, T: TryFrom<Cow<'a, BStr>>>(
-        &'a self,
-        section_name: &str,
-        subsection_name: Option<&BStr>,
-        key: &str,
-    ) -> Option<Result<T, T::Error>> {
-        self.raw_value(section_name, subsection_name, key).ok().map(T::try_from)
-    }
-
-    /// Returns all interpreted values given a section, an optional subsection
-    /// and key.
+    /// Returns an interpreted value given a section, an optional subsection and
+    /// value name.
     ///
     /// It's recommended to use one of the value types provide dby this crate
     /// as they implement the conversion, but this function is flexible and
-    /// will accept any type that implements [`TryFrom<&BStr>`][std::convert::TryFrom].
+    /// will accept any type that implements [`TryFrom<&BStr>`](std::convert::TryFrom).
+    ///
+    /// Consider [`Self::values`] if you want to get all values of a multivar instead.
+    ///
+    /// If a `string` is desired, use the [`string()`](Self::string()) method instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use gix_config::File;
+    /// # use gix_config::{Integer, Boolean};
+    /// # use std::borrow::Cow;
+    /// # use std::convert::TryFrom;
+    /// let config = r#"
+    ///     [core]
+    ///         a = 10k
+    ///         c = false
+    /// "#;
+    /// let git_config = gix_config::File::try_from(config)?;
+    /// // You can either use the turbofish to determine the type...
+    /// let a_value = git_config.value_by::<Integer>("core", None, "a")?;
+    /// // ... or explicitly declare the type to avoid the turbofish
+    /// let c_value: Boolean = git_config.value_by("core", None, "c")?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn value_by<'a, T: TryFrom<Cow<'a, BStr>>>(
+        &'a self,
+        section_name: &str,
+        subsection_name: Option<&BStr>,
+        value_name: &str,
+    ) -> Result<T, lookup::Error<T::Error>> {
+        T::try_from(self.raw_value_by(section_name, subsection_name, value_name)?)
+            .map_err(lookup::Error::FailedConversion)
+    }
+
+    /// Like [`value()`](File::value()), but returning an `None` if the value wasn't found at `section[.subsection].value_name`
+    pub fn try_value<'a, T: TryFrom<Cow<'a, BStr>>>(&'a self, key: impl AsKey) -> Option<Result<T, T::Error>> {
+        let key = key.as_key();
+        self.try_value_by(key.section_name, key.subsection_name, key.value_name)
+    }
+
+    /// Like [`value_by()`](File::value_by()), but returning an `None` if the value wasn't found at `section[.subsection].value_name`
+    pub fn try_value_by<'a, T: TryFrom<Cow<'a, BStr>>>(
+        &'a self,
+        section_name: &str,
+        subsection_name: Option<&BStr>,
+        value_name: &str,
+    ) -> Option<Result<T, T::Error>> {
+        self.raw_value_by(section_name, subsection_name, value_name)
+            .ok()
+            .map(T::try_from)
+    }
+
+    /// Returns all interpreted values given a section, an optional subsection
+    /// and value name.
+    ///
+    /// It's recommended to use one of the value types provide dby this crate
+    /// as they implement the conversion, but this function is flexible and
+    /// will accept any type that implements [`TryFrom<&BStr>`](TryFrom).
     ///
     /// Consider [`Self::value`] if you want to get a single value
     /// (following last-one-wins resolution) instead.
     ///
-    /// To access plain strings, use the [`strings()`][Self::strings()] method instead.
+    /// To access plain strings, use the [`strings()`](Self::strings()) method instead.
     ///
     /// # Examples
     ///
@@ -96,9 +139,9 @@ impl<'event> File<'event> {
     ///         a
     ///         a = false
     /// "#;
-    /// let gix_config = gix_config::File::try_from(config).unwrap();
+    /// let git_config = gix_config::File::try_from(config).unwrap();
     /// // You can either use the turbofish to determine the type...
-    /// let a_value = gix_config.values::<Boolean>("core", None, "a")?;
+    /// let a_value = git_config.values::<Boolean>("core.a")?;
     /// assert_eq!(
     ///     a_value,
     ///     vec![
@@ -108,20 +151,75 @@ impl<'event> File<'event> {
     ///     ]
     /// );
     /// // ... or explicitly declare the type to avoid the turbofish
-    /// let c_value: Vec<Boolean> = gix_config.values("core", None, "c").unwrap();
+    /// let c_value: Vec<Boolean> = git_config.values("core.c").unwrap();
     /// assert_eq!(c_value, vec![Boolean(false)]);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// [`value`]: crate::value
     /// [`TryFrom`]: std::convert::TryFrom
-    pub fn values<'a, T: TryFrom<Cow<'a, BStr>>>(
+    pub fn values<'a, T: TryFrom<Cow<'a, BStr>>>(&'a self, key: impl AsKey) -> Result<Vec<T>, lookup::Error<T::Error>> {
+        self.raw_values(key)?
+            .into_iter()
+            .map(T::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(lookup::Error::FailedConversion)
+    }
+
+    /// Returns all interpreted values given a section, an optional subsection
+    /// and value name.
+    ///
+    /// It's recommended to use one of the value types provide dby this crate
+    /// as they implement the conversion, but this function is flexible and
+    /// will accept any type that implements [`TryFrom<&BStr>`](std::convert::TryFrom).
+    ///
+    /// Consider [`Self::value`] if you want to get a single value
+    /// (following last-one-wins resolution) instead.
+    ///
+    /// To access plain strings, use the [`strings()`](Self::strings()) method instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use gix_config::File;
+    /// # use gix_config::{Integer, Boolean};
+    /// # use std::borrow::Cow;
+    /// # use std::convert::TryFrom;
+    /// # use bstr::ByteSlice;
+    /// let config = r#"
+    ///     [core]
+    ///         a = true
+    ///         c
+    ///     [core]
+    ///         a
+    ///         a = false
+    /// "#;
+    /// let git_config = gix_config::File::try_from(config).unwrap();
+    /// // You can either use the turbofish to determine the type...
+    /// let a_value = git_config.values_by::<Boolean>("core", None, "a")?;
+    /// assert_eq!(
+    ///     a_value,
+    ///     vec![
+    ///         Boolean(true),
+    ///         Boolean(false),
+    ///         Boolean(false),
+    ///     ]
+    /// );
+    /// // ... or explicitly declare the type to avoid the turbofish
+    /// let c_value: Vec<Boolean> = git_config.values_by("core", None, "c").unwrap();
+    /// assert_eq!(c_value, vec![Boolean(false)]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// [`value`]: crate::value
+    /// [`TryFrom`]: std::convert::TryFrom
+    pub fn values_by<'a, T: TryFrom<Cow<'a, BStr>>>(
         &'a self,
         section_name: &str,
         subsection_name: Option<&BStr>,
-        key: &str,
+        value_name: &str,
     ) -> Result<Vec<T>, lookup::Error<T::Error>> {
-        self.raw_values(section_name, subsection_name, key)?
+        self.raw_values_by(section_name, subsection_name, value_name)?
             .into_iter()
             .map(T::try_from)
             .collect::<Result<Vec<_>, _>>()
@@ -131,20 +229,18 @@ impl<'event> File<'event> {
     /// Returns the last found immutable section with a given `name` and optional `subsection_name`.
     pub fn section(
         &self,
-        name: impl AsRef<str>,
+        name: &str,
         subsection_name: Option<&BStr>,
     ) -> Result<&file::Section<'event>, lookup::existing::Error> {
-        self.section_filter(name, subsection_name, &mut |_| true)?
+        self.section_filter(name, subsection_name, |_| true)?
             .ok_or(lookup::existing::Error::SectionMissing)
     }
 
-    /// Returns the last found immutable section with a given `key`, identifying the name and subsection name like `core`
+    /// Returns the last found immutable section with a given `section_key`, identifying the name and subsection name like `core`
     /// or `remote.origin`.
-    pub fn section_by_key<'a>(
-        &self,
-        key: impl Into<&'a BStr>,
-    ) -> Result<&file::Section<'event>, lookup::existing::Error> {
-        let key = crate::parse::section::unvalidated::Key::parse(key).ok_or(lookup::existing::Error::KeyMissing)?;
+    pub fn section_by_key(&self, section_key: &BStr) -> Result<&file::Section<'event>, lookup::existing::Error> {
+        let key =
+            crate::parse::section::unvalidated::Key::parse(section_key).ok_or(lookup::existing::Error::KeyMissing)?;
         self.section(key.section_name, key.subsection_name)
     }
 
@@ -154,9 +250,9 @@ impl<'event> File<'event> {
     /// is returned.
     pub fn section_filter<'a>(
         &'a self,
-        name: impl AsRef<str>,
+        name: &str,
         subsection_name: Option<&BStr>,
-        filter: &mut MetadataFilter,
+        mut filter: impl FnMut(&Metadata) -> bool,
     ) -> Result<Option<&'a file::Section<'event>>, lookup::existing::Error> {
         Ok(self
             .section_ids_by_name_and_subname(name.as_ref(), subsection_name)?
@@ -170,13 +266,14 @@ impl<'event> File<'event> {
             }))
     }
 
-    /// Like [`section_filter()`][File::section_filter()], but identifies the section with `key` like `core` or `remote.origin`.
-    pub fn section_filter_by_key<'a, 'b>(
+    /// Like [`section_filter()`](File::section_filter()), but identifies the section with `section_key` like `core` or `remote.origin`.
+    pub fn section_filter_by_key<'a>(
         &'a self,
-        key: impl Into<&'b BStr>,
-        filter: &mut MetadataFilter,
+        section_key: &BStr,
+        filter: impl FnMut(&Metadata) -> bool,
     ) -> Result<Option<&'a file::Section<'event>>, lookup::existing::Error> {
-        let key = crate::parse::section::unvalidated::Key::parse(key).ok_or(lookup::existing::Error::KeyMissing)?;
+        let key =
+            crate::parse::section::unvalidated::Key::parse(section_key).ok_or(lookup::existing::Error::KeyMissing)?;
         self.section_filter(key.section_name, key.subsection_name, filter)
     }
 
@@ -210,12 +307,15 @@ impl<'event> File<'event> {
     ///     [core "apple"]
     ///         e = f
     /// "#;
-    /// let gix_config = gix_config::File::try_from(config)?;
-    /// assert_eq!(gix_config.sections_by_name("core").map_or(0, |s|s.count()), 3);
+    /// let git_config = gix_config::File::try_from(config)?;
+    /// assert_eq!(git_config.sections_by_name("core").map_or(0, |s|s.count()), 3);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[must_use]
-    pub fn sections_by_name<'a>(&'a self, name: &'a str) -> Option<impl Iterator<Item = &file::Section<'event>> + '_> {
+    pub fn sections_by_name<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> Option<impl Iterator<Item = &'a file::Section<'event>> + 'a> {
         self.section_ids_by_name(name).ok().map(move |ids| {
             ids.map(move |id| {
                 self.sections
@@ -225,13 +325,13 @@ impl<'event> File<'event> {
         })
     }
 
-    /// Similar to [`sections_by_name()`][Self::sections_by_name()], but returns an identifier for this section as well to allow
+    /// Similar to [`sections_by_name()`](Self::sections_by_name()), but returns an identifier for this section as well to allow
     /// referring to it unambiguously even in the light of deletions.
     #[must_use]
     pub fn sections_and_ids_by_name<'a>(
         &'a self,
         name: &'a str,
-    ) -> Option<impl Iterator<Item = (&file::Section<'event>, SectionId)> + '_> {
+    ) -> Option<impl Iterator<Item = (&'a file::Section<'event>, SectionId)> + 'a> {
         self.section_ids_by_name(name).ok().map(move |ids| {
             ids.map(move |id| {
                 (
@@ -249,8 +349,8 @@ impl<'event> File<'event> {
     pub fn sections_by_name_and_filter<'a>(
         &'a self,
         name: &'a str,
-        filter: &'a mut MetadataFilter,
-    ) -> Option<impl Iterator<Item = &file::Section<'event>> + '_> {
+        mut filter: impl FnMut(&Metadata) -> bool + 'a,
+    ) -> Option<impl Iterator<Item = &'a file::Section<'event>> + 'a> {
         self.section_ids_by_name(name).ok().map(move |ids| {
             ids.filter_map(move |id| {
                 let s = self
@@ -295,7 +395,7 @@ impl<'event> File<'event> {
         self
     }
 
-    /// Similar to [`meta()`][File::meta()], but with shared ownership.
+    /// Similar to [`meta()`](File::meta()), but with shared ownership.
     pub fn meta_owned(&self) -> OwnShared<Metadata> {
         OwnShared::clone(&self.meta)
     }
@@ -314,7 +414,7 @@ impl<'event> File<'event> {
     /// in order of occurrence in the file itself.
     ///
     /// This allows to reproduce the look of sections perfectly when serializing them with
-    /// [`write_to()`][file::Section::write_to()].
+    /// [`write_to()`](file::Section::write_to()).
     pub fn sections_and_postmatter(&self) -> impl Iterator<Item = (&file::Section<'event>, Vec<&Event<'event>>)> {
         self.section_order.iter().map(move |id| {
             let s = &self.sections[id];

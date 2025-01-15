@@ -9,10 +9,10 @@
 //! * multiple loose objects and pack locations as gathered from `alternates` files.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 use std::{
@@ -50,8 +50,9 @@ pub struct Cache<S> {
 pub mod cache;
 
 ///
-/// It can optionally compress the content, similarly to what would happen when using a [`loose::Store`][crate::loose::Store].
+/// It can optionally compress the content, similarly to what would happen when using a [`loose::Store`].
 ///
+#[derive(Clone)]
 pub struct Sink {
     compressor: Option<RefCell<deflate::Write<std::io::Sink>>>,
     object_hash: gix_hash::Kind,
@@ -66,7 +67,9 @@ pub fn sink(object_hash: gix_hash::Kind) -> Sink {
 }
 
 ///
-pub mod sink;
+pub mod memory;
+
+mod sink;
 
 ///
 pub mod find;
@@ -74,7 +77,7 @@ pub mod find;
 /// An object database equivalent to `/dev/null`, dropping all objects stored into it.
 mod traits;
 
-pub use traits::{Find, FindExt, Header, HeaderExt, Write};
+pub use traits::{Header, HeaderExt};
 
 /// A thread-local handle to access any object.
 pub type Handle = Cache<store::Handle<OwnShared<Store>>>;
@@ -116,7 +119,7 @@ pub struct Store {
 
     /// The below state acts like a slot-map with each slot is mutable when the write lock is held, but readable independently of it.
     /// This allows multiple file to be loaded concurrently if there is multiple handles requesting to load packs or additional indices.
-    /// The map is static and cannot typically change.
+    /// The map is static and cannot change.
     /// It's read often and changed rarely.
     pub(crate) files: Vec<types::MutableIndexAndPack>,
 
@@ -142,11 +145,16 @@ pub fn at_opts(
     replacements: impl IntoIterator<Item = (gix_hash::ObjectId, gix_hash::ObjectId)>,
     options: store::init::Options,
 ) -> std::io::Result<Handle> {
-    let handle = OwnShared::new(Store::at_opts(objects_dir, replacements, options)?).to_handle();
+    let handle = OwnShared::new(Store::at_opts(
+        objects_dir.into(),
+        &mut replacements.into_iter(),
+        options,
+    )?)
+    .to_handle();
     Ok(Cache::from(handle))
 }
 
 /// Create a new cached handle to the object store.
 pub fn at(objects_dir: impl Into<PathBuf>) -> std::io::Result<Handle> {
-    at_opts(objects_dir, Vec::new().into_iter(), Default::default())
+    at_opts(objects_dir, Vec::new(), Default::default())
 }

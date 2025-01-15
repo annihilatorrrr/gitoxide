@@ -8,9 +8,9 @@ mod write {
     use crate::{Kind, Object, ObjectRef, WriteTo};
 
     /// Serialization
-    impl<'a> WriteTo for ObjectRef<'a> {
+    impl WriteTo for ObjectRef<'_> {
         /// Write the contained object to `out` in the git serialization format.
-        fn write_to(&self, out: impl io::Write) -> io::Result<()> {
+        fn write_to(&self, out: &mut dyn io::Write) -> io::Result<()> {
             use crate::ObjectRef::*;
             match self {
                 Tree(v) => v.write_to(out),
@@ -20,7 +20,11 @@ mod write {
             }
         }
 
-        fn size(&self) -> usize {
+        fn kind(&self) -> Kind {
+            self.kind()
+        }
+
+        fn size(&self) -> u64 {
             use crate::ObjectRef::*;
             match self {
                 Tree(v) => v.size(),
@@ -28,17 +32,13 @@ mod write {
                 Commit(v) => v.size(),
                 Tag(v) => v.size(),
             }
-        }
-
-        fn kind(&self) -> Kind {
-            self.kind()
         }
     }
 
     /// Serialization
     impl WriteTo for Object {
         /// Write the contained object to `out` in the git serialization format.
-        fn write_to(&self, out: impl io::Write) -> io::Result<()> {
+        fn write_to(&self, out: &mut dyn io::Write) -> io::Result<()> {
             use crate::Object::*;
             match self {
                 Tree(v) => v.write_to(out),
@@ -48,7 +48,11 @@ mod write {
             }
         }
 
-        fn size(&self) -> usize {
+        fn kind(&self) -> Kind {
+            self.kind()
+        }
+
+        fn size(&self) -> u64 {
             use crate::Object::*;
             match self {
                 Tree(v) => v.size(),
@@ -57,44 +61,40 @@ mod write {
                 Tag(v) => v.size(),
             }
         }
-
-        fn kind(&self) -> Kind {
-            self.kind()
-        }
     }
 }
 
 /// Convenient extraction of typed object.
 impl Object {
-    /// Turns this instance into a [`Blob`][Blob], panic otherwise.
+    /// Turns this instance into a [`Blob`], panic otherwise.
     pub fn into_blob(self) -> Blob {
         match self {
             Object::Blob(v) => v,
             _ => panic!("BUG: not a blob"),
         }
     }
-    /// Turns this instance into a [`Commit`][Commit] panic otherwise.
+    /// Turns this instance into a [`Commit`] panic otherwise.
     pub fn into_commit(self) -> Commit {
         match self {
             Object::Commit(v) => v,
             _ => panic!("BUG: not a commit"),
         }
     }
-    /// Turns this instance into a [`Tree`][Tree] panic otherwise.
+    /// Turns this instance into a [`Tree`] panic otherwise.
     pub fn into_tree(self) -> Tree {
         match self {
             Object::Tree(v) => v,
             _ => panic!("BUG: not a tree"),
         }
     }
-    /// Turns this instance into a [`Tag`][Tag] panic otherwise.
+    /// Turns this instance into a [`Tag`] panic otherwise.
     pub fn into_tag(self) -> Tag {
         match self {
             Object::Tag(v) => v,
             _ => panic!("BUG: not a tag"),
         }
     }
-    /// Turns this instance into a [`Blob`][Blob] if it is one.
+    /// Turns this instance into a [`Blob`] if it is one.
     #[allow(clippy::result_large_err)]
     pub fn try_into_blob(self) -> Result<Blob, Self> {
         match self {
@@ -102,14 +102,14 @@ impl Object {
             _ => Err(self),
         }
     }
-    /// Turns this instance into a [`BlobRef`][BlobRef] if it is a blob.
+    /// Turns this instance into a [`BlobRef`] if it is a blob.
     pub fn try_into_blob_ref(&self) -> Option<BlobRef<'_>> {
         match self {
             Object::Blob(v) => Some(v.to_ref()),
             _ => None,
         }
     }
-    /// Turns this instance into a [`Commit`][Commit] if it is one.
+    /// Turns this instance into a [`Commit`] if it is one.
     #[allow(clippy::result_large_err)]
     pub fn try_into_commit(self) -> Result<Commit, Self> {
         match self {
@@ -117,7 +117,7 @@ impl Object {
             _ => Err(self),
         }
     }
-    /// Turns this instance into a [`Tree`][Tree] if it is one.
+    /// Turns this instance into a [`Tree`] if it is one.
     #[allow(clippy::result_large_err)]
     pub fn try_into_tree(self) -> Result<Tree, Self> {
         match self {
@@ -125,7 +125,7 @@ impl Object {
             _ => Err(self),
         }
     }
-    /// Turns this instance into a [`Tag`][Tag] if it is one.
+    /// Turns this instance into a [`Tag`] if it is one.
     #[allow(clippy::result_large_err)]
     pub fn try_into_tag(self) -> Result<Tag, Self> {
         match self {
@@ -134,28 +134,28 @@ impl Object {
         }
     }
 
-    /// Returns a [`Blob`][Blob] if it is one.
+    /// Returns a [`Blob`] if it is one.
     pub fn as_blob(&self) -> Option<&Blob> {
         match self {
             Object::Blob(v) => Some(v),
             _ => None,
         }
     }
-    /// Returns a [`Commit`][Commit] if it is one.
+    /// Returns a [`Commit`] if it is one.
     pub fn as_commit(&self) -> Option<&Commit> {
         match self {
             Object::Commit(v) => Some(v),
             _ => None,
         }
     }
-    /// Returns a [`Tree`][Tree] if it is one.
+    /// Returns a [`Tree`] if it is one.
     pub fn as_tree(&self) -> Option<&Tree> {
         match self {
             Object::Tree(v) => Some(v),
             _ => None,
         }
     }
-    /// Returns a [`Tag`][Tag] if it is one.
+    /// Returns a [`Tag`] if it is one.
     pub fn as_tag(&self) -> Option<&Tag> {
         match self {
             Object::Tag(v) => Some(v),
@@ -185,6 +185,8 @@ pub enum LooseDecodeError {
     InvalidHeader(#[from] LooseHeaderDecodeError),
     #[error(transparent)]
     InvalidContent(#[from] DecodeError),
+    #[error("Object sized {size} does not fit into memory - this can happen on 32 bit systems")]
+    OutOfMemory { size: u64 },
 }
 
 impl<'a> ObjectRef<'a> {
@@ -193,7 +195,7 @@ impl<'a> ObjectRef<'a> {
         let (kind, size, offset) = loose_header(data)?;
 
         let body = &data[offset..]
-            .get(..size)
+            .get(..size.try_into().map_err(|_| LooseDecodeError::OutOfMemory { size })?)
             .ok_or(LooseHeaderDecodeError::InvalidHeader {
                 message: "object data was shorter than its size declared in the header",
             })?;

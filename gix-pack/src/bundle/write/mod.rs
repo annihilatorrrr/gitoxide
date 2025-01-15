@@ -13,16 +13,13 @@ use crate::data;
 
 mod error;
 pub use error::Error;
+use gix_features::progress::prodash::DynNestedProgress;
 
 mod types;
 use types::{LockWriter, PassThrough};
 pub use types::{Options, Outcome};
 
 use crate::bundle::write::types::SharedTempFile;
-
-type ThinPackLookupFn = Box<dyn for<'a> FnMut(gix_hash::ObjectId, &'a mut Vec<u8>) -> Option<gix_object::Data<'a>>>;
-type ThinPackLookupFnSend =
-    Box<dyn for<'a> FnMut(gix_hash::ObjectId, &'a mut Vec<u8>) -> Option<gix_object::Data<'a>> + Send + 'static>;
 
 /// The progress ids used in [`write_to_directory()`][crate::Bundle::write_to_directory()].
 ///
@@ -53,27 +50,25 @@ impl crate::Bundle {
     ///
     /// * `progress` provides detailed progress information which can be discarded with [`gix_features::progress::Discard`].
     /// * `should_interrupt` is checked regularly and when true, the whole operation will stop.
-    /// * `thin_pack_base_object_lookup_fn` If set, we expect to see a thin-pack with objects that reference their base object by object id which is
-    /// expected to exist in the object database the bundle is contained within.
-    /// `options` further configure how the task is performed.
+    /// * `thin_pack_base_object_lookup` If set, we expect to see a thin-pack with objects that reference their base object by object id which is
+    ///    expected to exist in the object database the bundle is contained within.
+    ///    `options` further configure how the task is performed.
     ///
     /// # Note
     ///
     /// * the resulting pack may be empty, that is, contains zero objects in some situations. This is a valid reply by a server and should
     ///   be accounted for.
     ///   - Empty packs always have the same name and not handling this case will result in at most one superfluous pack.
-    pub fn write_to_directory<P>(
-        pack: impl io::BufRead,
-        directory: Option<impl AsRef<Path>>,
-        mut progress: P,
+    pub fn write_to_directory(
+        pack: &mut dyn io::BufRead,
+        directory: Option<&Path>,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
-        thin_pack_base_object_lookup_fn: Option<ThinPackLookupFn>,
+        thin_pack_base_object_lookup: Option<impl gix_object::Find>,
         options: Options,
-    ) -> Result<Outcome, Error>
-    where
-        P: Progress,
-    {
-        let mut read_progress = progress.add_child_with_id("read pack", ProgressId::ReadPackBytes.into());
+    ) -> Result<Outcome, Error> {
+        let _span = gix_features::trace::coarse!("gix_pack::Bundle::write_to_directory()");
+        let mut read_progress = progress.add_child_with_id("read pack".into(), ProgressId::ReadPackBytes.into());
         read_progress.init(None, progress::bytes());
         let pack = progress::Read {
             inner: pack,
@@ -91,8 +86,8 @@ impl crate::Bundle {
         let (pack_entries_iter, pack_version): (
             Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>>>,
             _,
-        ) = match thin_pack_base_object_lookup_fn {
-            Some(thin_pack_lookup_fn) => {
+        ) = match thin_pack_base_object_lookup {
+            Some(thin_pack_lookup) => {
                 let pack = interrupt::Read {
                     inner: pack,
                     should_interrupt,
@@ -105,7 +100,7 @@ impl crate::Bundle {
                         data::input::EntryDataMode::KeepAndCrc32,
                         object_hash,
                     )?,
-                    thin_pack_lookup_fn,
+                    thin_pack_lookup,
                 );
                 let pack_version = pack_entries_iter.inner.version();
                 let pack_entries_iter = data::input::EntriesToBytesIter::new(
@@ -171,22 +166,19 @@ impl crate::Bundle {
     /// # Note
     ///
     /// As it sends portions of the input to a thread it requires the 'static lifetime for the interrupt flags. This can only
-    /// be satisfied by a static AtomicBool which is only suitable for programs that only run one of these operations at a time
+    /// be satisfied by a static `AtomicBool` which is only suitable for programs that only run one of these operations at a time
     /// or don't mind that all of them abort when the flag is set.
-    pub fn write_to_directory_eagerly<P>(
-        pack: impl io::Read + Send + 'static,
+    pub fn write_to_directory_eagerly(
+        pack: Box<dyn io::Read + Send + 'static>,
         pack_size: Option<u64>,
         directory: Option<impl AsRef<Path>>,
-        mut progress: P,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &'static AtomicBool,
-        thin_pack_base_object_lookup_fn: Option<ThinPackLookupFnSend>,
+        thin_pack_base_object_lookup: Option<impl gix_object::Find + Send + 'static>,
         options: Options,
-    ) -> Result<Outcome, Error>
-    where
-        P: Progress,
-        P::SubProgress: 'static,
-    {
-        let mut read_progress = progress.add_child_with_id("read pack", ProgressId::ReadPackBytes.into()); /* Bundle Write Read pack Bytes*/
+    ) -> Result<Outcome, Error> {
+        let _span = gix_features::trace::coarse!("gix_pack::Bundle::write_to_directory_eagerly()");
+        let mut read_progress = progress.add_child_with_id("read pack".into(), ProgressId::ReadPackBytes.into()); /* Bundle Write Read pack Bytes*/
         read_progress.init(pack_size.map(|s| s as usize), progress::bytes());
         let pack = progress::Read {
             inner: pack,
@@ -202,8 +194,8 @@ impl crate::Bundle {
         let (pack_entries_iter, pack_version): (
             Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>> + Send + 'static>,
             _,
-        ) = match thin_pack_base_object_lookup_fn {
-            Some(thin_pack_lookup_fn) => {
+        ) = match thin_pack_base_object_lookup {
+            Some(thin_pack_lookup) => {
                 let pack = interrupt::Read {
                     inner: pack,
                     should_interrupt,
@@ -216,7 +208,7 @@ impl crate::Bundle {
                         data::input::EntryDataMode::KeepAndCrc32,
                         object_hash,
                     )?,
-                    thin_pack_lookup_fn,
+                    thin_pack_lookup,
                 );
                 let pack_kind = pack_entries_iter.inner.version();
                 (Box::new(pack_entries_iter), pack_kind)
@@ -254,7 +246,7 @@ impl crate::Bundle {
             progress,
             options,
             data_file,
-            pack_entries_iter,
+            Box::new(pack_entries_iter),
             should_interrupt,
             pack_version,
         )?;
@@ -269,9 +261,9 @@ impl crate::Bundle {
         })
     }
 
-    fn inner_write(
+    fn inner_write<'a>(
         directory: Option<impl AsRef<Path>>,
-        mut progress: impl Progress,
+        progress: &mut dyn DynNestedProgress,
         Options {
             thread_limit,
             iteration_mode: _,
@@ -279,12 +271,12 @@ impl crate::Bundle {
             object_hash,
         }: Options,
         data_file: SharedTempFile,
-        pack_entries_iter: impl Iterator<Item = Result<data::input::Entry, data::input::Error>>,
+        mut pack_entries_iter: Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>> + 'a>,
         should_interrupt: &AtomicBool,
         pack_version: data::Version,
     ) -> Result<WriteOutcome, Error> {
-        let indexing_progress = progress.add_child_with_id(
-            "create index file",
+        let mut indexing_progress = progress.add_child_with_id(
+            "create index file".into(),
             ProgressId::IndexingSteps(Default::default()).into(),
         );
         Ok(match directory {
@@ -298,50 +290,66 @@ impl crate::Bundle {
                         let data_file = Arc::clone(&data_file);
                         move || new_pack_file_resolver(data_file)
                     },
-                    pack_entries_iter,
+                    &mut pack_entries_iter,
                     thread_limit,
-                    indexing_progress,
+                    &mut indexing_progress,
                     &mut index_file,
                     should_interrupt,
                     object_hash,
                     pack_version,
                 )?;
+                drop(pack_entries_iter);
 
-                let data_path = directory.join(format!("pack-{}.pack", outcome.data_hash.to_hex()));
-                let index_path = data_path.with_extension("idx");
-                let keep_path = data_path.with_extension("keep");
+                if outcome.num_objects == 0 {
+                    WriteOutcome {
+                        outcome,
+                        data_path: None,
+                        index_path: None,
+                        keep_path: None,
+                    }
+                } else {
+                    let data_path = directory.join(format!("pack-{}.pack", outcome.data_hash.to_hex()));
+                    let index_path = data_path.with_extension("idx");
+                    let keep_path = if data_path.is_file() {
+                        // avoid trying to overwrite existing files, we know they have the same content
+                        // and this is likely to fail on Windows as negotiation opened the pack.
+                        None
+                    } else {
+                        let keep_path = data_path.with_extension("keep");
 
-                std::fs::write(&keep_path, b"")?;
-                Arc::try_unwrap(data_file)
-                    .expect("only one handle left after pack was consumed")
-                    .into_inner()
-                    .into_inner()
-                    .map_err(|err| Error::from(err.into_error()))?
-                    .persist(&data_path)?;
-                index_file
-                    .persist(&index_path)
-                    .map_err(|err| {
-                        progress.info(format!(
-                            "pack file at {} is retained despite failing to move the index file into place. You can use plumbing to make it usable.",
-                            data_path.display()
-                        ));
-                        err
-                    })?;
-                WriteOutcome {
-                    outcome,
-                    data_path: Some(data_path),
-                    index_path: Some(index_path),
-                    keep_path: Some(keep_path),
+                        std::fs::write(&keep_path, b"")?;
+                        Arc::try_unwrap(data_file)
+                            .expect("only one handle left after pack was consumed")
+                            .into_inner()
+                            .into_inner()
+                            .map_err(|err| Error::from(err.into_error()))?
+                            .persist(&data_path)?;
+                        Some(keep_path)
+                    };
+                    if !index_path.is_file() {
+                        index_file
+                            .persist(&index_path)
+                            .map_err(|err| {
+                                gix_features::trace::warn!("pack file at \"{}\" is retained despite failing to move the index file into place. You can use plumbing to make it usable.",data_path.display());
+                                err
+                            })?;
+                    }
+                    WriteOutcome {
+                        outcome,
+                        data_path: Some(data_path),
+                        index_path: Some(index_path),
+                        keep_path,
+                    }
                 }
             }
             None => WriteOutcome {
                 outcome: crate::index::File::write_data_iter_to_stream(
                     index_kind,
                     move || new_pack_file_resolver(data_file),
-                    pack_entries_iter,
+                    &mut pack_entries_iter,
                     thread_limit,
-                    indexing_progress,
-                    io::sink(),
+                    &mut indexing_progress,
+                    &mut io::sink(),
                     should_interrupt,
                     object_hash,
                     pack_version,
@@ -354,20 +362,21 @@ impl crate::Bundle {
     }
 }
 
+fn resolve_entry(range: data::EntryRange, mapped_file: &memmap2::Mmap) -> Option<&[u8]> {
+    mapped_file.get(range.start as usize..range.end as usize)
+}
+
+#[allow(clippy::type_complexity)] // cannot typedef impl Fn
 fn new_pack_file_resolver(
     data_file: SharedTempFile,
-) -> io::Result<impl Fn(data::EntryRange, &mut Vec<u8>) -> Option<()> + Send + Clone> {
+) -> io::Result<(
+    impl Fn(data::EntryRange, &memmap2::Mmap) -> Option<&[u8]> + Send + Clone,
+    memmap2::Mmap,
+)> {
     let mut guard = data_file.lock();
     guard.flush()?;
-    let mapped_file = Arc::new(crate::mmap::read_only(
-        &guard.get_mut().with_mut(|f| f.path().to_owned())?,
-    )?);
-    let pack_data_lookup = move |range: std::ops::Range<u64>, out: &mut Vec<u8>| -> Option<()> {
-        mapped_file
-            .get(range.start as usize..range.end as usize)
-            .map(|pack_entry| out.copy_from_slice(pack_entry))
-    };
-    Ok(pack_data_lookup)
+    let mapped_file = crate::mmap::read_only(&guard.get_mut().with_mut(|f| f.path().to_owned())?)?;
+    Ok((resolve_entry, mapped_file))
 }
 
 struct WriteOutcome {

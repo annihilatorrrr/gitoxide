@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 
 use crate::bstr::{BStr, BString, ByteSlice};
 
-/// The error returned by [SnapshotMut::apply_cli_overrides()][crate::config::SnapshotMut::append_config()].
+/// The error returned by [`SnapshotMut::apply_cli_overrides()`][crate::config::SnapshotMut::append_config()].
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
@@ -11,7 +11,7 @@ pub enum Error {
     #[error("Key {key:?} could not be parsed")]
     SectionKey {
         key: BString,
-        source: gix_config::parse::section::key::Error,
+        source: gix_config::parse::section::value_name::Error,
     },
     #[error(transparent)]
     SectionHeader(#[from] gix_config::parse::section::header::Error),
@@ -26,22 +26,22 @@ pub(crate) fn append(
     let mut file = gix_config::File::new(gix_config::file::Metadata::from(source));
     for key_value in values {
         let key_value = key_value.as_ref();
-        let mut tokens = key_value.splitn(2, |b| *b == b'=').map(|v| v.trim());
+        let mut tokens = key_value.splitn(2, |b| *b == b'=').map(ByteSlice::trim);
         let key = tokens.next().expect("always one value").as_bstr();
         let value = tokens.next();
-        let key = gix_config::parse::key(key.to_str().map_err(|_| Error::InvalidKey { input: key.into() })?)
-            .ok_or_else(|| Error::InvalidKey { input: key.into() })?;
+        let key = gix_config::KeyRef::parse_unvalidated(key).ok_or_else(|| Error::InvalidKey { input: key.into() })?;
         let mut section = file.section_mut_or_create_new(key.section_name, key.subsection_name)?;
-        let key =
-            gix_config::parse::section::Key::try_from(key.value_name.to_owned()).map_err(|err| Error::SectionKey {
+        let value_name = gix_config::parse::section::ValueName::try_from(key.value_name.to_owned()).map_err(|err| {
+            Error::SectionKey {
                 source: err,
                 key: key.value_name.into(),
-            })?;
+            }
+        })?;
         let comment = make_comment(key_value);
-        let value = value.map(|v| v.as_bstr());
+        let value = value.map(ByteSlice::as_bstr);
         match comment {
-            Some(comment) => section.push_with_comment(key, value, &**comment),
-            None => section.push(key, value),
+            Some(comment) => section.push_with_comment(value_name, value, &**comment),
+            None => section.push(value_name, value),
         };
     }
     config.append(file);

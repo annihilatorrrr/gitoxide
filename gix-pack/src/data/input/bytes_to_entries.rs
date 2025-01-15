@@ -1,25 +1,21 @@
 use std::{fs, io};
 
-use gix_features::{
-    hash,
-    hash::Sha1,
-    zlib::{stream::inflate::ReadBoxed, Decompress},
-};
+use gix_features::{hash::Hasher, zlib::Decompress};
 use gix_hash::ObjectId;
 
 use crate::data::input;
 
 /// An iterator over [`Entries`][input::Entry] in a byte stream.
 ///
-/// The iterator used as part of [Bundle::write_to_directory(…)][crate::Bundle::write_to_directory()].
+/// The iterator used as part of [`Bundle::write_to_directory(…)`][crate::Bundle::write_to_directory()].
 pub struct BytesToEntriesIter<BR> {
     read: BR,
-    decompressor: Option<Box<Decompress>>,
+    decompressor: Decompress,
     offset: u64,
     had_error: bool,
     version: crate::data::Version,
     objects_left: u32,
-    hash: Option<Sha1>,
+    hash: Option<Hasher>,
     mode: input::Mode,
     compressed: input::EntryDataMode,
     compressed_buf: Option<Vec<u8>>,
@@ -66,7 +62,7 @@ where
         );
         Ok(BytesToEntriesIter {
             read,
-            decompressor: None,
+            decompressor: Decompress::new(true),
             compressed,
             offset: 12,
             had_error: false,
@@ -88,31 +84,25 @@ where
         self.objects_left -= 1; // even an error counts as objects
 
         // Read header
-        let entry = match self.hash.take() {
+        let entry = match self.hash.as_mut() {
             Some(hash) => {
                 let mut read = read_and_pass_to(
                     &mut self.read,
-                    hash::Write {
+                    HashWrite {
                         inner: io::sink(),
                         hash,
                     },
                 );
-                let res = crate::data::Entry::from_read(&mut read, self.offset, self.hash_len);
-                self.hash = Some(read.write.hash);
-                res
+                crate::data::Entry::from_read(&mut read, self.offset, self.hash_len)
             }
             None => crate::data::Entry::from_read(&mut self.read, self.offset, self.hash_len),
         }
         .map_err(input::Error::from)?;
 
         // Decompress object to learn its compressed bytes
-        let mut decompressor = self
-            .decompressor
-            .take()
-            .unwrap_or_else(|| Box::new(Decompress::new(true)));
         let compressed_buf = self.compressed_buf.take().unwrap_or_else(|| Vec::with_capacity(4096));
-        decompressor.reset(true);
-        let mut decompressed_reader = ReadBoxed {
+        self.decompressor.reset(true);
+        let mut decompressed_reader = DecompressRead {
             inner: read_and_pass_to(
                 &mut self.read,
                 if self.compressed.keep() {
@@ -121,7 +111,7 @@ where
                     compressed_buf
                 },
             ),
-            decompressor,
+            decompressor: &mut self.decompressor,
         };
 
         let bytes_copied = io::copy(&mut decompressed_reader, &mut io::sink())?;
@@ -135,7 +125,6 @@ where
         let pack_offset = self.offset;
         let compressed_size = decompressed_reader.decompressor.total_in();
         self.offset += entry.header_size() as u64 + compressed_size;
-        self.decompressor = Some(decompressed_reader.decompressor);
 
         let mut compressed = decompressed_reader.inner.write;
         debug_assert_eq!(
@@ -149,7 +138,7 @@ where
 
         let crc32 = if self.compressed.crc32() {
             let mut header_buf = [0u8; 12 + gix_hash::Kind::longest().len_in_bytes()];
-            let header_len = entry.header.write_to(bytes_copied, header_buf.as_mut())?;
+            let header_len = entry.header.write_to(bytes_copied, &mut header_buf.as_mut())?;
             let state = gix_features::hash::crc32_update(0, &header_buf[..header_len]);
             Some(gix_features::hash::crc32_update(state, &compressed))
         } else {
@@ -265,7 +254,7 @@ where
         self.write
             .write_all(&buf[..amt])
             .expect("a write to never fail - should be a memory buffer");
-        self.read.consume(amt)
+        self.read.consume(amt);
     }
 }
 
@@ -291,5 +280,45 @@ impl crate::data::File {
             input::EntryDataMode::KeepAndCrc32,
             self.object_hash,
         )
+    }
+}
+
+/// The boxed variant is faster for what we do (moving the decompressor in and out a lot)
+pub struct DecompressRead<'a, R> {
+    /// The reader from which bytes should be decompressed.
+    pub inner: R,
+    /// The decompressor doing all the work.
+    pub decompressor: &'a mut Decompress,
+}
+
+impl<R> io::Read for DecompressRead<'_, R>
+where
+    R: io::BufRead,
+{
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        gix_features::zlib::stream::inflate::read(&mut self.inner, self.decompressor, into)
+    }
+}
+
+/// A utility to automatically generate a hash while writing into an inner writer.
+pub struct HashWrite<'a, T> {
+    /// The hash implementation.
+    pub hash: &'a mut Hasher,
+    /// The inner writer.
+    pub inner: T,
+}
+
+impl<T> std::io::Write for HashWrite<'_, T>
+where
+    T: std::io::Write,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hash.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }

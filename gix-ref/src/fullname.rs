@@ -1,48 +1,50 @@
-use std::{borrow::Borrow, convert::TryFrom, path::Path};
+use std::{borrow::Borrow, path::Path};
 
 use gix_object::bstr::{BStr, BString, ByteSlice};
 
 use crate::{bstr::ByteVec, name::is_pseudo_ref, Category, FullName, FullNameRef, Namespace, PartialNameRef};
 
 impl TryFrom<&str> for FullName {
-    type Error = gix_validate::refname::Error;
+    type Error = gix_validate::reference::name::Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Ok(FullName(gix_validate::refname(value.as_bytes().as_bstr())?.into()))
+        Ok(FullName(
+            gix_validate::reference::name(value.as_bytes().as_bstr())?.into(),
+        ))
     }
 }
 
 impl TryFrom<String> for FullName {
-    type Error = gix_validate::refname::Error;
+    type Error = gix_validate::reference::name::Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        gix_validate::refname(value.as_bytes().as_bstr())?;
+        gix_validate::reference::name(value.as_bytes().as_bstr())?;
         Ok(FullName(value.into()))
     }
 }
 
 impl TryFrom<&BStr> for FullName {
-    type Error = gix_validate::refname::Error;
+    type Error = gix_validate::reference::name::Error;
 
     fn try_from(value: &BStr) -> Result<Self, Self::Error> {
-        Ok(FullName(gix_validate::refname(value)?.into()))
+        Ok(FullName(gix_validate::reference::name(value)?.into()))
     }
 }
 
 impl TryFrom<BString> for FullName {
-    type Error = gix_validate::refname::Error;
+    type Error = gix_validate::reference::name::Error;
 
     fn try_from(value: BString) -> Result<Self, Self::Error> {
-        gix_validate::refname(value.as_ref())?;
+        gix_validate::reference::name(value.as_ref())?;
         Ok(FullName(value))
     }
 }
 
 impl TryFrom<&BString> for FullName {
-    type Error = gix_validate::refname::Error;
+    type Error = gix_validate::reference::name::Error;
 
     fn try_from(value: &BString) -> Result<Self, Self::Error> {
-        gix_validate::refname(value.as_ref())?;
+        gix_validate::reference::name(value.as_ref())?;
         Ok(FullName(value.clone()))
     }
 }
@@ -92,8 +94,7 @@ impl FullNameRef {
     /// If there is no such prefix, the original name is returned.
     pub fn shorten(&self) -> &BStr {
         self.category_and_short_name()
-            .map(|(_, short)| short)
-            .unwrap_or_else(|| self.0.as_bstr())
+            .map_or_else(|| self.0.as_bstr(), |(_, short)| short)
     }
 
     /// Classify this name, or return `None` if it's unclassified.
@@ -133,7 +134,7 @@ impl FullNameRef {
             if shortened.starts_with_str("refs/") {
                 (Category::MainRef, shortened.as_bstr()).into()
             } else {
-                is_pseudo_ref(shortened).then(|| (Category::MainPseudoRef, shortened.as_bstr()))
+                is_pseudo_ref(shortened.into()).then(|| (Category::MainPseudoRef, shortened.as_bstr()))
             }
         } else if let Some(shortened_with_worktree_name) =
             name.strip_prefix(Category::LinkedPseudoRef { name: "".into() }.prefix().as_bytes())

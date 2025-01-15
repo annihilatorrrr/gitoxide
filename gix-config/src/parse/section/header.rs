@@ -59,28 +59,10 @@ fn validated_name(name: Cow<'_, BStr>) -> Result<Cow<'_, BStr>, Error> {
         .ok_or(Error::InvalidName)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_header_names_are_legal() {
-        assert!(Header::new("", None).is_ok(), "yes, git allows this, so do we");
-    }
-
-    #[test]
-    fn empty_header_sub_names_are_legal() {
-        assert!(
-            Header::new("remote", Some(Cow::Borrowed("".into()))).is_ok(),
-            "yes, git allows this, so do we"
-        );
-    }
-}
-
 impl Header<'_> {
     ///Return true if this is a header like `[legacy.subsection]`, or false otherwise.
     pub fn is_legacy(&self) -> bool {
-        self.separator.as_deref().map_or(false, |n| n == ".")
+        self.separator.as_deref().is_some_and(|n| n == ".")
     }
 
     /// Return the subsection name, if present, i.e. "origin" in `[remote "origin"]`.
@@ -147,7 +129,7 @@ fn escape_subsection(name: &BStr) -> Cow<'_, BStr> {
     let mut buf = Vec::with_capacity(name.len());
     for b in name.iter().copied() {
         match b {
-            b'\\' => buf.push_str(br#"\\"#),
+            b'\\' => buf.push_str(br"\\"),
             b'"' => buf.push_str(br#"\""#),
             _ => buf.push(b),
         }
@@ -163,7 +145,7 @@ impl Display for Header<'_> {
 
 impl From<Header<'_>> for BString {
     fn from(header: Header<'_>) -> Self {
-        header.into()
+        header.to_bstring()
     }
 }
 
@@ -176,5 +158,23 @@ impl From<&Header<'_>> for BString {
 impl<'a> From<Header<'a>> for Event<'a> {
     fn from(header: Header<'_>) -> Event<'_> {
         Event::SectionHeader(header)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_header_names_are_legal() {
+        assert!(Header::new("", None).is_ok(), "yes, git allows this, so do we");
+    }
+
+    #[test]
+    fn empty_header_sub_names_are_legal() {
+        assert!(
+            Header::new("remote", Some(Cow::Borrowed("".into()))).is_ok(),
+            "yes, git allows this, so do we"
+        );
     }
 }

@@ -1,4 +1,4 @@
-use std::{convert::TryFrom, ffi::OsString};
+use std::ffi::OsString;
 
 use bstr::BString;
 
@@ -18,9 +18,9 @@ impl TryFrom<OsString> for Action {
 
     fn try_from(value: OsString) -> Result<Self, Self::Error> {
         Ok(match value.to_str() {
-            Some("fill") | Some("get") => Action::Get,
-            Some("approve") | Some("store") => Action::Store,
-            Some("reject") | Some("erase") => Action::Erase,
+            Some("fill" | "get") => Action::Get,
+            Some("approve" | "store") => Action::Store,
+            Some("reject" | "erase") => Action::Erase,
             _ => return Err(Error::ActionInvalid { name: value }),
         })
     }
@@ -60,7 +60,7 @@ pub enum Error {
 }
 
 pub(crate) mod function {
-    use std::{convert::TryInto, ffi::OsString};
+    use std::ffi::OsString;
 
     use crate::{
         program::main::{Action, Error},

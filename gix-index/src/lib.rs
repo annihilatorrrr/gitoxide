@@ -1,15 +1,19 @@
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(unsafe_code, missing_docs, rust_2018_idioms)]
 
+use bstr::{BStr, ByteSlice};
 use std::{ops::Range, path::PathBuf};
 
 use filetime::FileTime;
+/// `gix_hash` is made available as it's part of the public API in various places.
 pub use gix_hash as hash;
+/// A re-export to allow calling [`State::from_tree()`].
+pub use gix_validate as validate;
 
 ///
 pub mod file;
@@ -22,7 +26,8 @@ pub mod entry;
 
 mod access;
 
-mod init;
+///
+pub mod init;
 
 ///
 pub mod decode;
@@ -33,9 +38,11 @@ pub mod verify;
 ///
 pub mod write;
 
+pub mod fs;
+
 /// All known versions of a git index file.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Version {
     /// Supports entries and various extensions.
     V2 = 2,
@@ -77,10 +84,48 @@ pub type PathStorage = Vec<u8>;
 /// The type to use and store paths to all entries, as reference
 pub type PathStorageRef = [u8];
 
+struct DirEntry<'a> {
+    /// The first entry in the directory
+    entry: &'a Entry,
+    /// One past the last byte of the directory in the path-backing
+    dir_end: usize,
+}
+
+impl DirEntry<'_> {
+    fn path<'a>(&self, state: &'a State) -> &'a BStr {
+        let range = self.entry.path.start..self.dir_end;
+        state.path_backing[range].as_bstr()
+    }
+}
+
+/// A backing store for accelerating lookups of entries in a case-sensitive and case-insensitive manner.
+pub struct AccelerateLookup<'a> {
+    /// The entries themselves, hashed by their full icase path.
+    /// Icase-clashes are handled in order of occurrence and are all available for iteration.
+    icase_entries: hashbrown::HashTable<&'a Entry>,
+    /// Each hash in this table corresponds to a directory containing one or more entries.
+    icase_dirs: hashbrown::HashTable<DirEntry<'a>>,
+}
+
 /// An in-memory cache of a fully parsed git index file.
 ///
 /// As opposed to a snapshot, it's meant to be altered and eventually be written back to disk or converted into a tree.
 /// We treat index and its state synonymous.
+///
+/// # A note on safety
+///
+/// An index (i.e. [`State`]) created by hand is not guaranteed to have valid entry paths as they are entirely controlled
+/// by the caller, without applying any level of validation.
+///
+/// This means that before using these paths to recreate files on disk, *they must be validated*.
+///
+/// It's notable that it's possible to manufacture tree objects which contain names like `.git/hooks/pre-commit`
+/// which then will look like `.git/hooks/pre-commit` in the index, which doesn't care that the name came from a single
+/// tree instead of from trees named `.git`, `hooks` and a blob named `pre-commit`. The effect is still the same - an invalid
+/// path is presented in the index and its consumer must validate each path component before usage.
+///
+/// It's recommended to do that using `gix_worktree::Stack` which has it built-in if it's created `for_checkout()`. Alternatively
+/// one can validate component names with `gix_validate::path::component()`.
 #[derive(Clone)]
 pub struct State {
     /// The kind of object hash used when storing the underlying file.
@@ -91,16 +136,19 @@ pub struct State {
     ///
     /// Note that on platforms that only have a precisions of a second for this time, we will treat all entries with the
     /// same timestamp as this as potentially changed, checking more thoroughly if a change actually happened.
-    #[allow(dead_code)]
     timestamp: FileTime,
     version: Version,
     entries: Vec<Entry>,
     /// A memory area keeping all index paths, in full length, independently of the index version.
+    ///
+    /// Ranges into this storage are referred to by parts of `entries`.
     path_backing: PathStorage,
     /// True if one entry in the index has a special marker mode
     is_sparse: bool,
 
     // Extensions
+    end_of_index_at_decode_time: bool,
+    offset_table_at_decode_time: bool,
     tree: Option<extension::Tree>,
     link: Option<extension::Link>,
     resolve_undo: Option<extension::resolve_undo::Paths>,
@@ -109,6 +157,7 @@ pub struct State {
 }
 
 mod impls {
+    use crate::entry::Stage;
     use std::fmt::{Debug, Formatter};
 
     use crate::State;
@@ -120,10 +169,10 @@ mod impls {
                     f,
                     "{} {}{:?} {} {}",
                     match entry.flags.stage() {
-                        0 => "BASE   ",
-                        1 => "OURS   ",
-                        2 => "THEIRS ",
-                        _ => "UNKNOWN",
+                        Stage::Unconflicted => "       ",
+                        Stage::Base => "BASE   ",
+                        Stage::Ours => "OURS   ",
+                        Stage::Theirs => "THEIRS ",
                     },
                     if entry.flags.is_empty() {
                         "".to_string()
@@ -141,8 +190,6 @@ mod impls {
 }
 
 pub(crate) mod util {
-    use std::convert::TryInto;
-
     #[inline]
     pub fn var_int(data: &[u8]) -> Option<(u64, &[u8])> {
         let (num, consumed) = gix_features::decode::leb64_from_read(data).ok()?;
@@ -189,13 +236,4 @@ pub(crate) mod util {
         }
         data.split_at(pos).into()
     }
-}
-
-#[test]
-fn size_of_entry() {
-    assert_eq!(std::mem::size_of::<crate::Entry>(), 80);
-
-    // the reason we have our own time is half the size.
-    assert_eq!(std::mem::size_of::<crate::entry::Time>(), 8);
-    assert_eq!(std::mem::size_of::<filetime::FileTime>(), 16);
 }

@@ -1,54 +1,3 @@
-///
-pub mod existing {
-    use gix_hash::ObjectId;
-
-    /// The error returned by the [`find(…)`][crate::FindExt::find()] trait methods.
-    #[derive(Debug, thiserror::Error)]
-    #[allow(missing_docs)]
-    pub enum Error<T: std::error::Error + 'static> {
-        #[error(transparent)]
-        Find(T),
-        #[error("An object with id {} could not be found", .oid)]
-        NotFound { oid: ObjectId },
-    }
-}
-
-///
-pub mod existing_object {
-    use gix_hash::ObjectId;
-
-    /// The error returned by the various [`find_*()`][crate::FindExt::find_commit()] trait methods.
-    #[derive(Debug, thiserror::Error)]
-    #[allow(missing_docs)]
-    pub enum Error<T: std::error::Error + 'static> {
-        #[error(transparent)]
-        Find(T),
-        #[error(transparent)]
-        Decode(gix_object::decode::Error),
-        #[error("An object with id {oid} could not be found")]
-        NotFound { oid: ObjectId },
-        #[error("Expected object of kind {expected}")]
-        ObjectKind { expected: gix_object::Kind },
-    }
-}
-
-///
-pub mod existing_iter {
-    use gix_hash::ObjectId;
-
-    /// The error returned by the various [`find_*_iter()`][crate::FindExt::find_commit_iter()] trait methods.
-    #[derive(Debug, thiserror::Error)]
-    #[allow(missing_docs)]
-    pub enum Error<T: std::error::Error + 'static> {
-        #[error(transparent)]
-        Find(T),
-        #[error("An object with id {oid} could not be found")]
-        NotFound { oid: ObjectId },
-        #[error("Expected object of kind {expected}")]
-        ObjectKind { expected: gix_object::Kind },
-    }
-}
-
 /// An object header informing about object properties, without it being fully decoded in the process.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Header {
@@ -102,11 +51,11 @@ mod header {
         }
     }
 
-    impl From<(usize, gix_object::Kind)> for Header {
-        fn from((object_size, kind): (usize, gix_object::Kind)) -> Self {
+    impl From<(u64, gix_object::Kind)> for Header {
+        fn from((object_size, kind): (u64, gix_object::Kind)) -> Self {
             Header::Loose {
                 kind,
-                size: object_size as u64,
+                size: object_size,
             }
         }
     }

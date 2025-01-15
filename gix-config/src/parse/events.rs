@@ -1,57 +1,55 @@
-use std::convert::TryFrom;
-
 use smallvec::SmallVec;
 
 use crate::{
     parse,
-    parse::{section, Event, Section},
+    parse::{Event, Section},
 };
 
 /// A type store without allocation all events that are typically preceding the first section.
 pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 
-/// A zero-copy `gix-config` file parser.
+/// A zero-copy `git-config` file parser.
 ///
-/// This is parser exposes low-level syntactic events from a `gix-config` file.
+/// This is parser exposes low-level syntactic events from a `git-config` file.
 /// Generally speaking, you'll want to use [`File`] as it wraps
-/// around the parser to provide a higher-level abstraction to a `gix-config`
+/// around the parser to provide a higher-level abstraction to a `git-config`
 /// file, including querying, modifying, and updating values.
 ///
 /// This parser guarantees that the events emitted are sufficient to
-/// reconstruct a `gix-config` file identical to the source `gix-config`
+/// reconstruct a `git-config` file identical to the source `git-config`
 /// when writing it.
 ///
 /// # Differences between a `.ini` parser
 ///
-/// While the `gix-config` format closely resembles the [`.ini` file format],
+/// While the `git-config` format closely resembles the [`.ini` file format],
 /// there are subtle differences that make them incompatible. For one, the file
 /// format is not well defined, and there exists no formal specification to
 /// adhere to.
 ///
 /// For concrete examples, some notable differences are:
-/// - `gix-config` sections permit subsections via either a quoted string
-/// (`[some-section "subsection"]`) or via the deprecated dot notation
-/// (`[some-section.subsection]`). Successful parsing these section names is not
-/// well defined in typical `.ini` parsers. This parser will handle these cases
-/// perfectly.
+/// - `git-config` sections permit subsections via either a quoted string
+///   (`[some-section "subsection"]`) or via the deprecated dot notation
+///   (`[some-section.subsection]`). Successful parsing these section names is not
+///   well defined in typical `.ini` parsers. This parser will handle these cases
+///   perfectly.
 /// - Comment markers are not strictly defined either. This parser will always
-/// and only handle a semicolon or octothorpe (also known as a hash or number
-/// sign).
+///   and only handle a semicolon or octothorpe (also known as a hash or number
+///   sign).
 /// - Global properties may be allowed in `.ini` parsers, but is strictly
-/// disallowed by this parser.
+///   disallowed by this parser.
 /// - Only `\t`, `\n`, `\b` `\\` are valid escape characters.
 /// - Quoted and semi-quoted values will be parsed (but quotes will be included
-/// in event outputs). An example of a semi-quoted value is `5"hello world"`,
-/// which should be interpreted as `5hello world` after
-/// [normalization][crate::value::normalize()].
+///   in event outputs). An example of a semi-quoted value is `5"hello world"`,
+///   which should be interpreted as `5hello world` after
+///   [normalization][crate::value::normalize()].
 /// - Line continuations via a `\` character is supported (inside or outside of quotes)
-/// - Whitespace handling similarly follows the `gix-config` specification as
-/// closely as possible, where excess whitespace after a non-quoted value are
-/// trimmed, and line continuations onto a new line with excess spaces are kept.
+/// - Whitespace handling similarly follows the `git-config` specification as
+///   closely as possible, where excess whitespace after a non-quoted value are
+///   trimmed, and line continuations onto a new line with excess spaces are kept.
 /// - Only equal signs (optionally padded by spaces) are valid name/value
-/// delimiters.
+///   delimiters.
 ///
-/// Note that that things such as case-sensitivity or duplicate sections are
+/// Note that things such as case-sensitivity or duplicate sections are
 /// _not_ handled. This parser is a low level _syntactic_ interpreter
 /// and higher level wrappers around this parser, which may
 /// or may not be zero-copy, should handle _semantic_ values. This also means
@@ -64,8 +62,8 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// # Trait Implementations
 ///
 /// - This struct does _not_ implement [`FromStr`] due to lifetime
-/// constraints implied on the required `from_str` method. Instead, it provides
-/// [`From<&'_ str>`].
+///   constraints implied on the required `from_str` method. Instead, it provides
+///   [`From<&'_ str>`].
 ///
 /// # Idioms
 ///
@@ -74,7 +72,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///
 /// ## `Value` events do not immediately follow `Key` events
 ///
-/// Consider the following `gix-config` example:
+/// Consider the following `git-config` example:
 ///
 /// ```text
 /// [core]
@@ -94,7 +92,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
 /// Event::Whitespace(Cow::Borrowed("  ".into())),
-/// Event::SectionKey(section::Key::try_from("autocrlf")?),
+/// Event::SectionValueName(section::ValueName::try_from("autocrlf")?),
 /// Event::Whitespace(Cow::Borrowed(" ".into())),
 /// Event::KeyValueSeparator,
 /// Event::Whitespace(Cow::Borrowed(" ".into())),
@@ -110,7 +108,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///
 /// ## `KeyValueSeparator` event is not guaranteed to emit
 ///
-/// Consider the following `gix-config` example:
+/// Consider the following `git-config` example:
 ///
 /// ```text
 /// [core]
@@ -131,7 +129,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
 /// Event::Whitespace(Cow::Borrowed("  ".into())),
-/// Event::SectionKey(section::Key::try_from("autocrlf")?),
+/// Event::SectionValueName(section::ValueName::try_from("autocrlf")?),
 /// Event::Value(Cow::Borrowed("".into())),
 /// # ]);
 /// # Ok::<_, Box<dyn std::error::Error>>(())
@@ -139,7 +137,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///
 /// ## Quoted values are not unquoted
 ///
-/// Consider the following `gix-config` example:
+/// Consider the following `git-config` example:
 ///
 /// ```text
 /// [core]
@@ -162,11 +160,11 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// # assert_eq!(Events::from_str(section_data).unwrap().into_vec(), vec![
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
-/// Event::SectionKey(section::Key::try_from("autocrlf")?),
+/// Event::SectionValueName(section::ValueName::try_from("autocrlf")?),
 /// Event::KeyValueSeparator,
 /// Event::Value(Cow::Borrowed(r#"true"""#.into())),
 /// Event::Newline(Cow::Borrowed("\n".into())),
-/// Event::SectionKey(section::Key::try_from("filemode")?),
+/// Event::SectionValueName(section::ValueName::try_from("filemode")?),
 /// Event::KeyValueSeparator,
 /// Event::Value(Cow::Borrowed(r#"fa"lse""#.into())),
 /// # ]);
@@ -175,7 +173,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///
 /// ## Whitespace after line continuations are part of the value
 ///
-/// Consider the following `gix-config` example:
+/// Consider the following `git-config` example:
 ///
 /// ```text
 /// [some-section]
@@ -183,7 +181,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///     c
 /// ```
 ///
-/// Because how `gix-config` treats continuations, the whitespace preceding `c`
+/// Because how `git-config` treats continuations, the whitespace preceding `c`
 /// are in fact part of the value of `file`. The fully interpreted key/value
 /// pair is actually `file=a    c`. As a result, the parser will provide this
 /// split value accordingly:
@@ -197,7 +195,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// # assert_eq!(Events::from_str(section_data).unwrap().into_vec(), vec![
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
-/// Event::SectionKey(section::Key::try_from("file")?),
+/// Event::SectionValueName(section::ValueName::try_from("file")?),
 /// Event::KeyValueSeparator,
 /// Event::ValueNotDone(Cow::Borrowed("a".into())),
 /// Event::Newline(Cow::Borrowed("\n".into())),
@@ -208,7 +206,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///
 /// [`File`]: crate::File
 /// [`.ini` file format]: https://en.wikipedia.org/wiki/INI_file
-/// [`git`'s documentation]: https://git-scm.com/docs/gix-config#_configuration_file
+/// [`git`'s documentation]: https://git-scm.com/docs/git-config#_configuration_file
 /// [`FromStr`]: std::str::FromStr
 /// [`From<&'_ str>`]: std::convert::From
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
@@ -229,19 +227,19 @@ impl Events<'static> {
         input: &'a [u8],
         filter: Option<fn(&Event<'a>) -> bool>,
     ) -> Result<Events<'static>, parse::Error> {
-        from_bytes(input, |e| e.to_owned(), filter)
+        from_bytes(input, &|e| e.to_owned(), filter)
     }
 }
 
 impl<'a> Events<'a> {
     /// Attempt to zero-copy parse the provided bytes. On success, returns a
     /// [`Events`] that provides methods to accessing leading comments and sections
-    /// of a `gix-config` file and can be converted into an iterator of [`Event`]
+    /// of a `git-config` file and can be converted into an iterator of [`Event`]
     /// for higher level processing.
     ///
     /// Use `filter` to only include those events for which it returns true.
     pub fn from_bytes(input: &'a [u8], filter: Option<fn(&Event<'a>) -> bool>) -> Result<Events<'a>, parse::Error> {
-        from_bytes(input, std::convert::identity, filter)
+        from_bytes(input, &std::convert::identity, filter)
     }
 
     /// Attempt to zero-copy parse the provided `input` string.
@@ -256,7 +254,7 @@ impl<'a> Events<'a> {
     /// Consumes the parser to produce an iterator of all contained events.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
     #[allow(clippy::should_implement_trait)]
-    pub fn into_iter(self) -> impl Iterator<Item = parse::Event<'a>> + std::iter::FusedIterator {
+    pub fn into_iter(self) -> impl std::iter::FusedIterator<Item = parse::Event<'a>> {
         self.frontmatter.into_iter().chain(
             self.sections
                 .into_iter()
@@ -288,14 +286,14 @@ impl<'a> TryFrom<&'a [u8]> for Events<'a> {
 
 fn from_bytes<'a, 'b>(
     input: &'a [u8],
-    convert: impl Fn(Event<'a>) -> Event<'b>,
+    convert: &dyn Fn(Event<'a>) -> Event<'b>,
     filter: Option<fn(&Event<'a>) -> bool>,
 ) -> Result<Events<'b>, parse::Error> {
     let mut header = None;
-    let mut events = section::Events::default();
+    let mut events = Vec::with_capacity(256);
     let mut frontmatter = FrontMatterEvents::default();
     let mut sections = Vec::new();
-    parse::from_bytes(input, |e: Event<'_>| match e {
+    parse::from_bytes(input, &mut |e: Event<'_>| match e {
         Event::SectionHeader(next_header) => {
             match header.take() {
                 None => {
@@ -316,7 +314,7 @@ fn from_bytes<'a, 'b>(
         }
         event => {
             if filter.map_or(true, |f| f(&event)) {
-                events.push(convert(event))
+                events.push(convert(event));
             }
         }
     })?;

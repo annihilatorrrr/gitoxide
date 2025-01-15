@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 use gix_hash::ObjectId;
 use gix_ref::{
     transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
@@ -25,7 +23,7 @@ impl crate::Repository {
             change: Change::Update {
                 log: Default::default(),
                 expected: constraint,
-                new: Target::Peeled(id),
+                new: Target::Object(id),
             },
             name: format!("refs/tags/{}", name.as_ref()).try_into()?,
             deref: false,
@@ -60,10 +58,10 @@ impl crate::Repository {
     pub fn set_namespace<'a, Name, E>(
         &mut self,
         namespace: Name,
-    ) -> Result<Option<gix_ref::Namespace>, gix_validate::refname::Error>
+    ) -> Result<Option<gix_ref::Namespace>, gix_validate::reference::name::Error>
     where
         Name: TryInto<&'a PartialNameRef, Error = E>,
-        gix_validate::refname::Error: From<E>,
+        gix_validate::reference::name::Error: From<E>,
     {
         let namespace = gix_ref::namespace::expand(namespace)?;
         Ok(self.refs.namespace.replace(namespace))
@@ -85,17 +83,30 @@ impl crate::Repository {
         Name: TryInto<FullName, Error = E>,
         gix_validate::reference::name::Error: From<E>,
     {
-        let name = name.try_into().map_err(gix_validate::reference::name::Error::from)?;
-        let id = target.into();
+        self.reference_inner(
+            name.try_into().map_err(gix_validate::reference::name::Error::from)?,
+            target.into(),
+            constraint,
+            log_message.into(),
+        )
+    }
+
+    fn reference_inner(
+        &self,
+        name: FullName,
+        id: ObjectId,
+        constraint: PreviousValue,
+        log_message: BString,
+    ) -> Result<Reference<'_>, reference::edit::Error> {
         let mut edits = self.edit_reference(RefEdit {
             change: Change::Update {
                 log: LogChange {
                     mode: RefLog::AndReference,
                     force_create_reflog: false,
-                    message: log_message.into(),
+                    message: log_message,
                 },
                 expected: constraint,
-                new: Target::Peeled(id),
+                new: Target::Object(id),
             },
             name,
             deref: false,
@@ -108,7 +119,7 @@ impl crate::Repository {
 
         Ok(gix_ref::Reference {
             name: edits.pop().expect("exactly one edit").name,
-            target: Target::Peeled(id),
+            target: Target::Object(id),
             peeled: None,
         }
         .attach(self))
@@ -124,7 +135,7 @@ impl crate::Repository {
 
     /// Edit one or more references as described by their `edits`.
     /// Note that one can set the committer name for use in the ref-log by temporarily
-    /// [overriding the gix-config][crate::Repository::config_snapshot_mut()].
+    /// [overriding the git-config][crate::Repository::config_snapshot_mut()].
     ///
     /// Returns all reference edits, which might be more than where provided due the splitting of symbolic references, and
     /// whose previous (_old_) values are the ones seen on in storage after the reference was locked.
@@ -148,10 +159,10 @@ impl crate::Repository {
         Ok(match head.inner.target {
             Target::Symbolic(branch) => match self.find_reference(&branch) {
                 Ok(r) => crate::head::Kind::Symbolic(r.detach()),
-                Err(reference::find::existing::Error::NotFound) => crate::head::Kind::Unborn(branch),
+                Err(reference::find::existing::Error::NotFound { .. }) => crate::head::Kind::Unborn(branch),
                 Err(err) => return Err(err),
             },
-            Target::Peeled(target) => crate::head::Kind::Detached {
+            Target::Object(target) => crate::head::Kind::Detached {
                 target,
                 peeled: head.inner.peeled,
             },
@@ -159,7 +170,8 @@ impl crate::Repository {
         .attach(self))
     }
 
-    /// Resolve the `HEAD` reference, follow and peel its target and obtain its object id.
+    /// Resolve the `HEAD` reference, follow and peel its target and obtain its object id,
+    /// following symbolic references and tags until a commit is found.
     ///
     /// Note that this may fail for various reasons, most notably because the repository
     /// is freshly initialized and doesn't have any commits yet.
@@ -167,12 +179,7 @@ impl crate::Repository {
     /// Also note that the returned id is likely to point to a commit, but could also
     /// point to a tree or blob. It won't, however, point to a tag as these are always peeled.
     pub fn head_id(&self) -> Result<crate::Id<'_>, reference::head_id::Error> {
-        let mut head = self.head()?;
-        head.peel_to_id_in_place()
-            .ok_or_else(|| reference::head_id::Error::Unborn {
-                name: head.referent_name().expect("unborn").to_owned(),
-            })?
-            .map_err(Into::into)
+        Ok(self.head()?.into_peeled_id()?)
     }
 
     /// Return the name to the symbolic reference `HEAD` points to, or `None` if the head is detached.
@@ -180,7 +187,7 @@ impl crate::Repository {
     /// The difference to [`head_ref()`][Self::head_ref()] is that the latter requires the reference to exist,
     /// whereas here we merely return a the name of the possibly unborn reference.
     pub fn head_name(&self) -> Result<Option<FullName>, reference::find::existing::Error> {
-        Ok(self.head()?.referent_name().map(|n| n.to_owned()))
+        Ok(self.head()?.referent_name().map(std::borrow::ToOwned::to_owned))
     }
 
     /// Return the reference that `HEAD` points to, or `None` if the head is detached or unborn.
@@ -188,13 +195,34 @@ impl crate::Repository {
         Ok(self.head()?.try_into_referent())
     }
 
-    /// Return the commit object the `HEAD` reference currently points to after peeling it fully.
+    /// Return the commit object the `HEAD` reference currently points to after peeling it fully,
+    /// following symbolic references and tags until a commit is found.
     ///
     /// Note that this may fail for various reasons, most notably because the repository
     /// is freshly initialized and doesn't have any commits yet. It could also fail if the
     /// head does not point to a commit.
     pub fn head_commit(&self) -> Result<crate::Commit<'_>, reference::head_commit::Error> {
         Ok(self.head()?.peel_to_commit_in_place()?)
+    }
+
+    /// Return the tree id the `HEAD` reference currently points to after peeling it fully,
+    /// following symbolic references and tags until a commit is found.
+    ///
+    /// Note that this may fail for various reasons, most notably because the repository
+    /// is freshly initialized and doesn't have any commits yet. It could also fail if the
+    /// head does not point to a commit.
+    pub fn head_tree_id(&self) -> Result<crate::Id<'_>, reference::head_tree_id::Error> {
+        Ok(self.head_commit()?.tree_id()?)
+    }
+
+    /// Return the tree object the `HEAD^{tree}` reference currently points to after peeling it fully,
+    /// following symbolic references and tags until a tree is found.
+    ///
+    /// Note that this may fail for various reasons, most notably because the repository
+    /// is freshly initialized and doesn't have any commits yet. It could also fail if the
+    /// head does not point to a tree, unlikely but possible.
+    pub fn head_tree(&self) -> Result<crate::Tree<'_>, reference::head_tree::Error> {
+        Ok(self.head_commit()?.tree()?)
     }
 
     /// Find the reference with the given partial or full `name`, like `main`, `HEAD`, `heads/branch` or `origin/other`,
@@ -204,11 +232,19 @@ impl crate::Repository {
     /// without that being considered an error.
     pub fn find_reference<'a, Name, E>(&self, name: Name) -> Result<Reference<'_>, reference::find::existing::Error>
     where
-        Name: TryInto<&'a PartialNameRef, Error = E>,
+        Name: TryInto<&'a PartialNameRef, Error = E> + Clone,
         gix_ref::file::find::Error: From<E>,
     {
+        // TODO: is there a way to just pass `partial_name` to `try_find_reference()`? Compiler freaks out then
+        //       as it still wants to see `E` there, not `Infallible`.
+        let partial_name = name
+            .clone()
+            .try_into()
+            .map_err(|err| reference::find::Error::Find(gix_ref::file::find::Error::from(err)))?;
         self.try_find_reference(name)?
-            .ok_or(reference::find::existing::Error::NotFound)
+            .ok_or_else(|| reference::find::existing::Error::NotFound {
+                name: partial_name.to_owned(),
+            })
     }
 
     /// Return a platform for iterating references.
@@ -231,8 +267,7 @@ impl crate::Repository {
         Name: TryInto<&'a PartialNameRef, Error = E>,
         gix_ref::file::find::Error: From<E>,
     {
-        let state = self;
-        match state.refs.try_find(name) {
+        match self.refs.try_find(name) {
             Ok(r) => match r {
                 Some(r) => Ok(Some(Reference::from_ref(r, self))),
                 None => Ok(None),

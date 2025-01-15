@@ -1,63 +1,64 @@
-use crate::cache::delta::Item;
+use std::marker::PhantomData;
 
-pub struct ItemSliceSend<T>(pub *mut [T])
-where
-    T: Send;
-
-impl<T> Clone for ItemSliceSend<T>
+/// SAFETY: This type is used to allow access to a size-optimized vec of items that form a
+/// tree, and we need to access it concurrently with each thread taking its own root node,
+/// and working its way through all the reachable leaves.
+///
+/// The tree was built by decoding a pack whose entries refer to its bases only by OFS_DELTA -
+/// they are pointing backwards only which assures bases have to be listed first, and that each entry
+/// only has a single parent.
+///
+/// REF_DELTA entries aren't supported here, and cause immediate failure - they are expected to have
+/// been resolved before as part of the thin-pack handling.
+///
+/// If we somehow would allow REF_DELTA entries to point to an in-pack object, then in theory malicious packs could
+/// cause all kinds of graphs as they can point anywhere in the pack, but they still can't link an entry to
+/// more than one base. And that's what one would really have to do for two threads to encounter the same child.
+///
+/// Thus I believe it's impossible for this data structure to end up in a place where it violates its assumption.
+pub(super) struct ItemSliceSync<'a, T>
 where
     T: Send,
 {
-    fn clone(&self) -> Self {
-        ItemSliceSend(self.0)
+    items: *mut T,
+    #[cfg(debug_assertions)]
+    len: usize,
+    phantom: PhantomData<&'a mut T>,
+}
+
+impl<'a, T> ItemSliceSync<'a, T>
+where
+    T: Send,
+{
+    pub(super) fn new(items: &'a mut [T]) -> Self {
+        ItemSliceSync {
+            items: items.as_mut_ptr(),
+            #[cfg(debug_assertions)]
+            len: items.len(),
+            phantom: PhantomData,
+        }
+    }
+
+    // SAFETY: The index must point into the slice and must not be reused concurrently.
+    #[allow(unsafe_code)]
+    pub(super) unsafe fn get_mut(&self, index: usize) -> &'a mut T {
+        #[cfg(debug_assertions)]
+        if index >= self.len {
+            panic!("index out of bounds: the len is {} but the index is {index}", self.len);
+        }
+        // SAFETY:
+        //    - The index is within the slice (required by documentation)
+        //    - We have mutable access to `items` as ensured by Self::new()
+        //    - This is the only method on this type giving access to items
+        //    - The documentation requires that this access is unique
+        unsafe { &mut *self.items.add(index) }
     }
 }
 
-// SAFETY: T is `Send`, and we only ever access one T at a time. And, ptrs need that assurance, I wonder if it's always right.
+// SAFETY: This is logically an &mut T, which is Send if T is Send
+// (note: this is different from &T, which also needs T: Sync)
 #[allow(unsafe_code)]
-unsafe impl<T> Send for ItemSliceSend<T> where T: Send {}
-
-/// An item returned by `iter_root_chunks`, allowing access to the `data` stored alongside nodes in a [`Tree`].
-pub struct Node<'a, T> {
-    pub item: &'a mut Item<T>,
-    pub child_items: *mut [Item<T>],
-}
-
-impl<'a, T> Node<'a, T> {
-    /// Returns the offset into the pack at which the `Node`s data is located.
-    pub fn offset(&self) -> u64 {
-        self.item.offset
-    }
-
-    /// Returns the slice into the data pack at which the pack entry is located.
-    pub fn entry_slice(&self) -> crate::data::EntryRange {
-        self.item.offset..self.item.next_offset
-    }
-
-    /// Returns the node data associated with this node.
-    pub fn data(&mut self) -> &mut T {
-        &mut self.item.data
-    }
-
-    /// Returns true if this node has children, e.g. is not a leaf in the tree.
-    pub fn has_children(&self) -> bool {
-        !self.item.children.is_empty()
-    }
-
-    /// Transform this `Node` into an iterator over its children.
-    ///
-    /// Children are `Node`s referring to pack entries whose base object is this pack entry.
-    pub fn into_child_iter(self) -> impl Iterator<Item = Node<'a, T>> + 'a {
-        let children = self.child_items;
-        self.item.children.iter().map(move |&index| {
-            // SAFETY: The children array is alive by the 'a lifetime.
-            // SAFETY: The index is a valid index into the children array.
-            // SAFETY: The resulting mutable pointer cannot be yielded by any other node.
-            #[allow(unsafe_code)]
-            Node {
-                item: unsafe { &mut *(children as *mut Item<T>).add(index as usize) },
-                child_items: children,
-            }
-        })
-    }
-}
+unsafe impl<T> Send for ItemSliceSync<'_, T> where T: Send {}
+// SAFETY: This is logically an &mut T, which is Sync if T is Sync
+#[allow(unsafe_code)]
+unsafe impl<T> Sync for ItemSliceSync<'_, T> where T: Send {}

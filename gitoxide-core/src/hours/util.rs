@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gix::bstr::{BStr, ByteSlice};
-use itertools::Itertools;
 
 use crate::hours::core::HOURS_PER_WORKDAY;
 
@@ -15,8 +14,8 @@ pub struct WorkByPerson {
     pub lines: LineStats,
 }
 
-impl<'a> WorkByPerson {
-    pub fn merge(&mut self, other: &'a WorkByEmail) {
+impl WorkByPerson {
+    pub fn merge(&mut self, other: &WorkByEmail) {
         if !self.name.contains(&other.name) {
             self.name.push(other.name);
         }
@@ -43,6 +42,35 @@ impl<'a> From<&'a WorkByEmail> for WorkByPerson {
     }
 }
 
+/// Combine all iterator elements into one String, separated by `sep`.
+///
+/// Use the `Display` implementation of each element.
+///
+/// extracted from
+/// https://github.com/rust-itertools/itertools/blob/762643f1be2217140a972745cf4d6ed69435f722/src/lib.rs#L2295-L2324
+fn join<I>(mut iter: I, sep: &str) -> String
+where
+    I: Iterator,
+    <I as Iterator>::Item: std::fmt::Display,
+{
+    use ::std::fmt::Write;
+
+    match iter.next() {
+        None => String::new(),
+        Some(first_elt) => {
+            // estimate lower bound of capacity needed
+            let (lower, _) = iter.size_hint();
+            let mut result = String::with_capacity(sep.len() * lower);
+            write!(&mut result, "{first_elt}").expect("enough memory");
+            iter.for_each(|elt| {
+                result.push_str(sep);
+                write!(&mut result, "{elt}").expect("enough memory");
+            });
+            result
+        }
+    }
+}
+
 impl WorkByPerson {
     pub fn write_to(
         &self,
@@ -53,9 +81,9 @@ impl WorkByPerson {
     ) -> std::io::Result<()> {
         writeln!(
             out,
-            "{} <{}>",
-            self.name.iter().join(", "),
-            self.email.iter().join(", ")
+            "{names} <{mails}>",
+            names = join(self.name.iter(), ", "),
+            mails = join(self.email.iter(), ", ")
         )?;
         writeln!(out, "{} commits found", self.num_commits)?;
         writeln!(
@@ -155,22 +183,21 @@ impl LineStats {
     }
 }
 
-pub fn add_lines(line_stats: bool, lines_counter: Option<&AtomicUsize>, mut lines: &mut LineStats, id: gix::Id<'_>) {
+/// An index able to address any commit
+pub type CommitIdx = u32;
+
+pub fn add_lines(line_stats: bool, lines_counter: &AtomicUsize, lines: &mut LineStats, id: gix::Id<'_>) {
     if let Some(Ok(blob)) = line_stats.then(|| id.object()) {
         let nl = blob.data.lines_with_terminator().count();
         lines.added += nl;
-        if let Some(c) = lines_counter {
-            c.fetch_add(nl, Ordering::SeqCst);
-        }
+        lines_counter.fetch_add(nl, Ordering::Relaxed);
     }
 }
 
-pub fn remove_lines(line_stats: bool, lines_counter: Option<&AtomicUsize>, mut lines: &mut LineStats, id: gix::Id<'_>) {
+pub fn remove_lines(line_stats: bool, lines_counter: &AtomicUsize, lines: &mut LineStats, id: gix::Id<'_>) {
     if let Some(Ok(blob)) = line_stats.then(|| id.object()) {
         let nl = blob.data.lines_with_terminator().count();
         lines.removed += nl;
-        if let Some(c) = lines_counter {
-            c.fetch_add(nl, Ordering::SeqCst);
-        }
+        lines_counter.fetch_add(nl, Ordering::Relaxed);
     }
 }

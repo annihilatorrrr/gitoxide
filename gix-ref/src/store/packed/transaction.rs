@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::{fmt::Formatter, io::Write};
 
 use crate::{
     file,
-    store_impl::{file::transaction::FindObjectFn, packed, packed::Edit},
+    store_impl::{packed, packed::Edit},
     transaction::{Change, RefEdit},
-    Target,
+    Namespace, Target,
 };
 
 pub(crate) const HEADER_LINE: &[u8] = b"# pack-refs with: peeled fully-peeled sorted \n";
@@ -14,12 +15,16 @@ impl packed::Transaction {
     pub(crate) fn new_from_pack_and_lock(
         buffer: Option<file::packed::SharedBufferSnapshot>,
         lock: gix_lock::File,
+        precompose_unicode: bool,
+        namespace: Option<Namespace>,
     ) -> Self {
         packed::Transaction {
             buffer,
             edits: None,
             lock: Some(lock),
             closed_lock: None,
+            precompose_unicode,
+            namespace,
         }
     }
 }
@@ -27,7 +32,7 @@ impl packed::Transaction {
 impl std::fmt::Debug for packed::Transaction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("packed::Transaction")
-            .field("edits", &self.edits.as_ref().map(|e| e.len()))
+            .field("edits", &self.edits.as_ref().map(Vec::len))
             .field("lock", &self.lock)
             .finish_non_exhaustive()
     }
@@ -44,16 +49,43 @@ impl packed::Transaction {
 /// Lifecycle
 impl packed::Transaction {
     /// Prepare the transaction by checking all edits for applicability.
+    /// Use `objects` to access objects for the purpose of peeling them - this is only used if packed-refs are involved.
     pub fn prepare(
         mut self,
-        edits: impl IntoIterator<Item = RefEdit>,
-        find: &mut FindObjectFn<'_>,
+        edits: &mut dyn Iterator<Item = RefEdit>,
+        objects: &dyn gix_object::Find,
     ) -> Result<Self, prepare::Error> {
         assert!(self.edits.is_none(), "BUG: cannot call prepare(…) more than once");
         let buffer = &self.buffer;
         // Remove all edits which are deletions that aren't here in the first place
         let mut edits: Vec<Edit> = edits
             .into_iter()
+            .map(|mut edit| {
+                use gix_object::bstr::ByteSlice;
+                if self.precompose_unicode {
+                    let precomposed = edit
+                        .name
+                        .0
+                        .to_str()
+                        .ok()
+                        .map(|name| gix_utils::str::precompose(name.into()));
+                    match precomposed {
+                        None | Some(Cow::Borrowed(_)) => edit,
+                        Some(Cow::Owned(precomposed)) => {
+                            edit.name.0 = precomposed.into();
+                            edit
+                        }
+                    }
+                } else {
+                    edit
+                }
+            })
+            .map(|mut edit| {
+                if let Some(namespace) = &self.namespace {
+                    edit.name = namespace.clone().into_namespaced_name(edit.name.as_ref());
+                }
+                edit
+            })
             .filter(|edit| {
                 if let Change::Delete { .. } = edit.change {
                     buffer.as_ref().map_or(true, |b| b.find(edit.name.as_ref()).is_ok())
@@ -68,17 +100,17 @@ impl packed::Transaction {
             .collect();
 
         let mut buf = Vec::new();
-        for edit in edits.iter_mut() {
+        for edit in &mut edits {
             if let Change::Update {
-                new: Target::Peeled(new),
+                new: Target::Object(new),
                 ..
             } = edit.inner.change
             {
                 let mut next_id = new;
                 edit.peeled = loop {
-                    let kind = find(next_id, &mut buf)?;
+                    let kind = objects.try_find(&next_id, &mut buf)?.map(|d| d.kind);
                     match kind {
-                        Some(kind) if kind == gix_object::Kind::Tag => {
+                        Some(gix_object::Kind::Tag) => {
                             next_id = gix_object::TagRefIter::from_bytes(&buf).target_id().map_err(|_| {
                                 prepare::Error::Resolve(
                                     format!("Couldn't get target object id from tag {next_id}").into(),
@@ -102,7 +134,7 @@ impl packed::Transaction {
             self.closed_lock = self
                 .lock
                 .take()
-                .map(|l| l.close())
+                .map(gix_lock::File::close)
                 .transpose()
                 .map_err(prepare::Error::CloseLock)?;
         } else {
@@ -189,7 +221,7 @@ impl packed::Transaction {
     }
 }
 
-fn write_packed_ref(mut out: impl std::io::Write, pref: packed::Reference<'_>) -> std::io::Result<()> {
+fn write_packed_ref(out: &mut dyn std::io::Write, pref: packed::Reference<'_>) -> std::io::Result<()> {
     write!(out, "{} ", pref.target)?;
     out.write_all(pref.name.as_bstr())?;
     out.write_all(b"\n")?;
@@ -199,11 +231,11 @@ fn write_packed_ref(mut out: impl std::io::Write, pref: packed::Reference<'_>) -
     Ok(())
 }
 
-fn write_edit(mut out: impl std::io::Write, edit: &Edit, lines_written: &mut i32) -> std::io::Result<()> {
+fn write_edit(out: &mut dyn std::io::Write, edit: &Edit, lines_written: &mut i32) -> std::io::Result<()> {
     match edit.inner.change {
         Change::Delete { .. } => {}
         Change::Update {
-            new: Target::Peeled(target_oid),
+            new: Target::Object(target_oid),
             ..
         } => {
             write!(out, "{target_oid} ")?;
@@ -226,6 +258,8 @@ fn write_edit(mut out: impl std::io::Write, edit: &Edit, lines_written: &mut i32
 pub(crate) fn buffer_into_transaction(
     buffer: file::packed::SharedBufferSnapshot,
     lock_mode: gix_lock::acquire::Fail,
+    precompose_unicode: bool,
+    namespace: Option<Namespace>,
 ) -> Result<packed::Transaction, gix_lock::acquire::Error> {
     let lock = gix_lock::File::acquire_to_update_resource(&buffer.path, lock_mode, None)?;
     Ok(packed::Transaction {
@@ -233,6 +267,8 @@ pub(crate) fn buffer_into_transaction(
         lock: Some(lock),
         closed_lock: None,
         edits: None,
+        precompose_unicode,
+        namespace,
     })
 }
 

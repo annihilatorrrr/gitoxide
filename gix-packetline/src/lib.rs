@@ -3,10 +3,10 @@
 //! For reading the packet line format use the [`StreamingPeekableIter`], and for writing the [`Writer`].
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, all(doc, feature = "document-features")),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 const U16_HEX_BYTES: usize = 4;
@@ -19,7 +19,7 @@ const ERR_PREFIX: &[u8] = b"ERR ";
 
 /// One of three side-band types allowing to multiplex information over a single connection.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Channel {
     /// The usable data itself in any format.
     Data = 1,
@@ -43,7 +43,7 @@ pub use write::blocking_io::Writer;
 
 /// A borrowed packet line as it refers to a slice of data by reference.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PacketLineRef<'a> {
     /// A chunk of raw data.
     Data(&'a [u8]),
@@ -57,17 +57,17 @@ pub enum PacketLineRef<'a> {
 
 /// A packet line representing an Error in a side-band channel.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ErrorRef<'a>(pub &'a [u8]);
 
 /// A packet line representing text, which may include a trailing newline.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextRef<'a>(pub &'a [u8]);
 
 /// A band in a side-band channel.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BandRef<'a> {
     /// A band carrying data.
     Data(&'a [u8]),
@@ -91,6 +91,8 @@ pub struct StreamingPeekableIter<T> {
     delimiters: &'static [PacketLineRef<'static>],
     is_done: bool,
     stopped_at: Option<PacketLineRef<'static>>,
+    #[cfg_attr(all(not(feature = "async-io"), not(feature = "blocking-io")), allow(dead_code))]
+    trace: bool,
 }
 
 /// Utilities to help decoding packet lines

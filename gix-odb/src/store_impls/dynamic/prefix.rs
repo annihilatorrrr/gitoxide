@@ -1,9 +1,8 @@
 use std::{collections::HashSet, ops::Deref};
 
-use crate::{
-    store::{load_index, Handle},
-    Find,
-};
+use gix_object::Exists;
+
+use crate::store::{load_index, Handle};
 
 ///
 pub mod lookup {
@@ -40,13 +39,13 @@ pub mod disambiguate {
         /// matching this prefix.
         pub fn new(id: impl Into<gix_hash::ObjectId>, hex_len: usize) -> Result<Self, gix_hash::prefix::Error> {
             let id = id.into();
-            gix_hash::Prefix::new(id, hex_len)?;
+            gix_hash::Prefix::new(&id, hex_len)?;
             Ok(Candidate { id, hex_len })
         }
 
         /// Transform ourselves into a `Prefix` with our current hex lengths.
         pub fn to_prefix(&self) -> gix_hash::Prefix {
-            gix_hash::Prefix::new(self.id, self.hex_len).expect("our hex-len to always be in bounds")
+            gix_hash::Prefix::new(&self.id, self.hex_len).expect("our hex-len to always be in bounds")
         }
 
         pub(crate) fn inc_hex_len(&mut self) {
@@ -85,11 +84,12 @@ where
         match *count {
             Some(count) => Ok(count),
             None => {
+                let _span = gix_features::trace::detail!("gix_odb::Handle::packed_object_count()");
                 let mut snapshot = self.snapshot.borrow_mut();
                 *snapshot = self.store.load_all_indices()?;
                 let mut obj_count = 0;
                 for index in &snapshot.indices {
-                    obj_count += index.num_objects() as u64;
+                    obj_count += u64::from(index.num_objects());
                 }
                 *count = Some(obj_count);
                 Ok(obj_count)
@@ -106,7 +106,7 @@ where
     ) -> Result<Option<gix_hash::Prefix>, disambiguate::Error> {
         let max_hex_len = candidate.id().kind().len_in_hex();
         if candidate.hex_len() == max_hex_len {
-            return Ok(self.contains(candidate.id()).then(|| candidate.to_prefix()));
+            return Ok(self.exists(candidate.id()).then(|| candidate.to_prefix()));
         }
 
         while candidate.hex_len() != max_hex_len {
@@ -147,7 +147,7 @@ where
         let mut candidate: Option<gix_hash::ObjectId> = None;
         loop {
             let snapshot = self.snapshot.borrow();
-            for index in snapshot.indices.iter() {
+            for index in &snapshot.indices {
                 #[allow(clippy::needless_option_as_deref)] // needed as it's the equivalent of a reborrow.
                 let lookup_result = index.lookup_prefix(prefix, candidates.as_deref_mut());
                 if candidates.is_none() && !check_candidate(lookup_result, &mut candidate) {
@@ -172,7 +172,7 @@ where
                     return match &candidates {
                         Some(candidates) => match candidates.len() {
                             0 => Ok(None),
-                            1 => Ok(candidates.iter().cloned().next().map(Ok)),
+                            1 => Ok(candidates.iter().copied().next().map(Ok)),
                             _ => Ok(Some(Err(()))),
                         },
                         None => Ok(candidate.map(Ok)),
@@ -184,7 +184,7 @@ where
         fn check_candidate(lookup_result: Option<lookup::Outcome>, candidate: &mut Option<gix_hash::ObjectId>) -> bool {
             match (lookup_result, &*candidate) {
                 (Some(Ok(oid)), Some(candidate)) if *candidate != oid => false,
-                (Some(Ok(_)), Some(_)) | (None, None) | (None, Some(_)) => true,
+                (Some(Ok(_)) | None, Some(_)) | (None, None) => true,
                 (Some(Err(())), _) => false,
                 (Some(Ok(oid)), None) => {
                     *candidate = Some(oid);

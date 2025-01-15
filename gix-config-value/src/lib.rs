@@ -1,11 +1,11 @@
-//! Parsing for data types used in `gix-config` files to allow their use from environment variables and other sources.
+//! Parsing for data types used in `git-config` files to allow their use from environment variables and other sources.
 //!
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 /// The error returned when any config value couldn't be instantiated due to malformed input.

@@ -1,6 +1,5 @@
 //!
-use std::convert::TryInto;
-
+#![allow(clippy::empty_docs)]
 use gix_hash::ObjectId;
 use gix_ref::FullNameRef;
 
@@ -101,8 +100,10 @@ mod remote {
         /// This is equivalent to calling [`Reference::remote(…)`][crate::Reference::remote()] and
         /// [`Repository::remote_default_name()`][crate::Repository::remote_default_name()] in order.
         ///
-        /// Combine it with [`find_default_remote()`][crate::Repository::find_default_remote()] as fallback to handle detached heads,
-        /// i.e. obtain a remote even in case of detached heads.
+        /// Combine it with [`Repository::find_default_remote()`][crate::Repository::find_default_remote()] as fallback to
+        /// handle detached heads, i.e. obtain a remote even in case of detached heads,
+        /// or call [`Repository::find_fetch_remote(…)`](crate::Repository::find_fetch_remote()) for the highest-level way of finding
+        /// the right remote, just like `git fetch` does.
         pub fn into_remote(
             self,
             direction: remote::Direction,

@@ -10,11 +10,11 @@
      - …if collaboration on a feature and prior feedback is desired
    - **feel free to use the [project-board] to organize your issues, PRs or cards**
 - **`main` must never be broken or show warnings**
-   - An easy way to achieve this is to run `make tests check-size` before pushing or `make tests check-size && git push`.
+   - An easy way to achieve this is to run `just test check-size` before pushing or `just check-size && git push`.
    - If you're unsure about remembering to do this, we suggest using a pre-commit git hook.
 - **if `main` breaks on CI** _which can happen nonetheless_…
     - …and you _do know_ the cause, please fix it immediately. If necessary by reverting the offending commit until a more durable fix is possible.
-    - …and you _do not know_ the cause, please open a PR to invite collaborators for their input. This is to avoid multiple collaborators 
+    - …and you _do not know_ the cause, please open a PR to invite collaborators for their input. This is to avoid multiple collaborators
       trying to fix the issue independently, causing merge-conflicts and confusion. We use this PR as synchronization primitive.
 - **for crates _you own_**
     - feel free to make any kind of changes to it, including major ones.
@@ -29,7 +29,6 @@ The workflow can be changed after public discussion - to get started, open a PR.
 
 Please see the [development guide] for more detailed information on how code and cargo manifests are structured.
 
-[development guide]: https://github.com/Byron/gitoxide/blob/main/DEVELOPMENT.md
-[project-board]: https://github.com/Byron/gitoxide/projects
-[discussions]: https://github.com/Byron/gitoxide/discussions
-
+[development guide]: https://github.com/GitoxideLabs/gitoxide/blob/main/DEVELOPMENT.md
+[project-board]: https://github.com/GitoxideLabs/gitoxide/projects
+[discussions]: https://github.com/GitoxideLabs/gitoxide/discussions

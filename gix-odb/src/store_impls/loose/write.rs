@@ -1,4 +1,4 @@
-use std::{convert::TryInto, fs, io, io::Write, path::PathBuf};
+use std::{fs, io, io::Write, path::PathBuf};
 
 use gix_features::{hash, zlib::stream::deflate};
 use gix_object::WriteTo;
@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 use super::Store;
 use crate::store_impls::loose;
 
-/// Returned by the [`crate::Write`] trait implementation of [`Store`]
+/// Returned by the [`gix_object::Write`] trait implementation of [`Store`]
 #[derive(thiserror::Error, Debug)]
 #[allow(missing_docs)]
 pub enum Error {
@@ -26,10 +26,8 @@ pub enum Error {
     },
 }
 
-impl crate::traits::Write for Store {
-    type Error = Error;
-
-    fn write(&self, object: impl WriteTo) -> Result<gix_hash::ObjectId, Self::Error> {
+impl gix_object::Write for Store {
+    fn write(&self, object: &dyn WriteTo) -> Result<gix_hash::ObjectId, gix_object::write::Error> {
         let mut to = self.dest()?;
         to.write_all(&object.loose_header()).map_err(|err| Error::Io {
             source: err,
@@ -41,16 +39,16 @@ impl crate::traits::Write for Store {
             message: "stream all data into tempfile in",
             path: self.path.to_owned(),
         })?;
-        to.flush()?;
-        self.finalize_object(to)
+        to.flush().map_err(Box::new)?;
+        Ok(self.finalize_object(to).map_err(Box::new)?)
     }
 
     /// Write the given buffer in `from` to disk in one syscall at best.
     ///
     /// This will cost at least 4 IO operations.
-    fn write_buf(&self, kind: gix_object::Kind, from: &[u8]) -> Result<gix_hash::ObjectId, Self::Error> {
-        let mut to = self.dest()?;
-        to.write_all(&gix_object::encode::loose_header(kind, from.len()))
+    fn write_buf(&self, kind: gix_object::Kind, from: &[u8]) -> Result<gix_hash::ObjectId, gix_object::write::Error> {
+        let mut to = self.dest().map_err(Box::new)?;
+        to.write_all(&gix_object::encode::loose_header(kind, from.len() as u64))
             .map_err(|err| Error::Io {
                 source: err,
                 message: "write header to tempfile in",
@@ -63,7 +61,7 @@ impl crate::traits::Write for Store {
             path: self.path.to_owned(),
         })?;
         to.flush()?;
-        self.finalize_object(to)
+        Ok(self.finalize_object(to)?)
     }
 
     /// Write the given stream in `from` to disk with at least one syscall.
@@ -73,35 +71,52 @@ impl crate::traits::Write for Store {
         &self,
         kind: gix_object::Kind,
         size: u64,
-        mut from: impl io::Read,
-    ) -> Result<gix_hash::ObjectId, Self::Error> {
-        let mut to = self.dest()?;
-        to.write_all(&gix_object::encode::loose_header(
-            kind,
-            size.try_into().expect("object size to fit into usize"),
-        ))
-        .map_err(|err| Error::Io {
-            source: err,
-            message: "write header to tempfile in",
-            path: self.path.to_owned(),
-        })?;
+        mut from: &mut dyn io::Read,
+    ) -> Result<gix_hash::ObjectId, gix_object::write::Error> {
+        let mut to = self.dest().map_err(Box::new)?;
+        to.write_all(&gix_object::encode::loose_header(kind, size))
+            .map_err(|err| Error::Io {
+                source: err,
+                message: "write header to tempfile in",
+                path: self.path.to_owned(),
+            })?;
 
-        io::copy(&mut from, &mut to).map_err(|err| Error::Io {
-            source: err,
-            message: "stream all data into tempfile in",
-            path: self.path.to_owned(),
-        })?;
-        to.flush()?;
-        self.finalize_object(to)
+        io::copy(&mut from, &mut to)
+            .map_err(|err| Error::Io {
+                source: err,
+                message: "stream all data into tempfile in",
+                path: self.path.to_owned(),
+            })
+            .map_err(Box::new)?;
+        to.flush().map_err(Box::new)?;
+        Ok(self.finalize_object(to)?)
     }
 }
 
 type CompressedTempfile = deflate::Write<NamedTempFile>;
 
+/// Access
+impl Store {
+    /// Return the path to the object with `id`.
+    ///
+    /// Note that is may not exist yet.
+    pub fn object_path(&self, id: &gix_hash::oid) -> PathBuf {
+        loose::hash_path(id, self.path.clone())
+    }
+}
+
 impl Store {
     fn dest(&self) -> Result<hash::Write<CompressedTempfile>, Error> {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o444);
+            builder.permissions(perms);
+        }
         Ok(hash::Write::new(
-            deflate::Write::new(NamedTempFile::new_in(&self.path).map_err(|err| Error::Io {
+            deflate::Write::new(builder.tempfile_in(&self.path).map_err(|err| Error::Io {
                 source: err,
                 message: "create named temp file in",
                 path: self.path.to_owned(),
@@ -126,7 +141,18 @@ impl Store {
             }
         }
         let file = file.into_inner();
-        file.persist(&object_path).map_err(|err| Error::Persist {
+        let res = file.persist(&object_path);
+        // On windows, we assume that such errors are due to its special filesystem semantics,
+        // on any other platform that would be a legitimate error though.
+        #[cfg(windows)]
+        if let Err(err) = &res {
+            if err.error.kind() == std::io::ErrorKind::PermissionDenied
+                || err.error.kind() == std::io::ErrorKind::AlreadyExists
+            {
+                return Ok(id);
+            }
+        }
+        res.map_err(|err| Error::Persist {
             source: err,
             target: object_path,
         })?;

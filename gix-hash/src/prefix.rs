@@ -1,8 +1,8 @@
-use std::{cmp::Ordering, convert::TryFrom};
+use std::cmp::Ordering;
 
 use crate::{oid, ObjectId, Prefix};
 
-/// The error returned by [Prefix::new()].
+/// The error returned by [`Prefix::new()`].
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
@@ -17,7 +17,7 @@ pub enum Error {
 
 ///
 pub mod from_hex {
-    /// The error returned by [Prefix::from_hex][super::Prefix::from_hex()].
+    /// The error returned by [`Prefix::from_hex`][super::Prefix::from_hex()].
     #[derive(Debug, Eq, PartialEq, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {
@@ -28,8 +28,8 @@ pub mod from_hex {
         TooShort { hex_len: usize },
         #[error("An id cannot be larger than {} chars in hex, but {hex_len} was requested", crate::Kind::longest().len_in_hex())]
         TooLong { hex_len: usize },
-        #[error("Invalid character {c} at position {index}")]
-        Invalid { c: char, index: usize },
+        #[error("Invalid hex character")]
+        Invalid,
     }
 }
 
@@ -41,8 +41,7 @@ impl Prefix {
     ///
     /// For instance, with `hex_len` of 7 the resulting prefix is 3.5 bytes, or 3 bytes and 4 bits
     /// wide, with all other bytes and bits set to zero.
-    pub fn new(id: impl AsRef<oid>, hex_len: usize) -> Result<Self, Error> {
-        let id = id.as_ref();
+    pub fn new(id: &oid, hex_len: usize) -> Result<Self, Error> {
         if hex_len > id.kind().len_in_hex() {
             Err(Error::TooLong {
                 object_kind: id.kind(),
@@ -95,7 +94,6 @@ impl Prefix {
 
     /// Create an instance from the given hexadecimal prefix `value`, e.g. `35e77c16` would yield a `Prefix` with `hex_len()` = 8.
     pub fn from_hex(value: &str) -> Result<Self, from_hex::Error> {
-        use hex::FromHex;
         let hex_len = value.len();
 
         if hex_len > crate::Kind::longest().len_in_hex() {
@@ -105,16 +103,20 @@ impl Prefix {
         };
 
         let src = if value.len() % 2 == 0 {
-            Vec::from_hex(value)
+            let mut out = Vec::from_iter(std::iter::repeat(0).take(value.len() / 2));
+            faster_hex::hex_decode(value.as_bytes(), &mut out).map(move |_| out)
         } else {
+            // TODO(perf): do without heap allocation here.
             let mut buf = [0u8; crate::Kind::longest().len_in_hex()];
             buf[..value.len()].copy_from_slice(value.as_bytes());
             buf[value.len()] = b'0';
-            Vec::from_hex(&buf[..value.len() + 1])
+            let src = &buf[..=value.len()];
+            let mut out = Vec::from_iter(std::iter::repeat(0).take(src.len() / 2));
+            faster_hex::hex_decode(src, &mut out).map(move |_| out)
         }
         .map_err(|e| match e {
-            hex::FromHexError::InvalidHexCharacter { c, index } => from_hex::Error::Invalid { c, index },
-            hex::FromHexError::OddLength | hex::FromHexError::InvalidStringLength => panic!("This is already checked"),
+            faster_hex::Error::InvalidChar | faster_hex::Error::Overflow => from_hex::Error::Invalid,
+            faster_hex::Error::InvalidLength(_) => panic!("This is already checked"),
         })?;
 
         let mut bytes = ObjectId::null(crate::Kind::from_hex_len(value.len()).expect("hex-len is already checked"));

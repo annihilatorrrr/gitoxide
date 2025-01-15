@@ -19,36 +19,21 @@ impl AsRef<[u8]> for packed::Backing {
 pub mod open {
     use std::path::PathBuf;
 
-    use memmap2::Mmap;
+    use winnow::{prelude::*, stream::Offset};
 
     use crate::store_impl::packed;
 
     /// Initialization
     impl packed::Buffer {
-        /// Open the file at `path` and map it into memory if the file size is larger than `use_memory_map_if_larger_than_bytes`.
-        ///
-        /// In order to allow fast lookups and optimizations, the contents of the packed refs must be sorted.
-        /// If that's not the case, they will be sorted on the fly with the data being written into a memory buffer.
-        pub fn open(path: impl Into<PathBuf>, use_memory_map_if_larger_than_bytes: u64) -> Result<Self, Error> {
-            let path = path.into();
+        fn open_with_backing(backing: packed::Backing, path: PathBuf) -> Result<Self, Error> {
             let (backing, offset) = {
-                let backing = if std::fs::metadata(&path)?.len() <= use_memory_map_if_larger_than_bytes {
-                    packed::Backing::InMemory(std::fs::read(&path)?)
-                } else {
-                    packed::Backing::Mapped(
-                        // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
-                        #[allow(unsafe_code)]
-                        unsafe {
-                            Mmap::map(&std::fs::File::open(&path)?)?
-                        },
-                    )
-                };
-
                 let (offset, sorted) = {
-                    let data = backing.as_ref();
-                    if *data.first().unwrap_or(&b' ') == b'#' {
-                        let (records, header) = packed::decode::header::<()>(data).map_err(|_| Error::HeaderParsing)?;
-                        let offset = records.as_ptr() as usize - data.as_ptr() as usize;
+                    let mut input = backing.as_ref();
+                    if *input.first().unwrap_or(&b' ') == b'#' {
+                        let header = packed::decode::header::<()>
+                            .parse_next(&mut input)
+                            .map_err(|_| Error::HeaderParsing)?;
+                        let offset = input.offset_from(&backing.as_ref());
                         (offset, header.sorted)
                     } else {
                         (0, false)
@@ -81,6 +66,34 @@ pub mod open {
                 data: backing,
                 path,
             })
+        }
+
+        /// Open the file at `path` and map it into memory if the file size is larger than `use_memory_map_if_larger_than_bytes`.
+        ///
+        /// In order to allow fast lookups and optimizations, the contents of the packed refs must be sorted.
+        /// If that's not the case, they will be sorted on the fly with the data being written into a memory buffer.
+        pub fn open(path: PathBuf, use_memory_map_if_larger_than_bytes: u64) -> Result<Self, Error> {
+            let backing = if std::fs::metadata(&path)?.len() <= use_memory_map_if_larger_than_bytes {
+                packed::Backing::InMemory(std::fs::read(&path)?)
+            } else {
+                packed::Backing::Mapped(
+                    // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        memmap2::MmapOptions::new().map_copy_read_only(&std::fs::File::open(&path)?)?
+                    },
+                )
+            };
+            Self::open_with_backing(backing, path)
+        }
+
+        /// Open a buffer from `bytes`, which is the content of a typical `packed-refs` file.
+        ///
+        /// In order to allow fast lookups and optimizations, the contents of the packed refs must be sorted.
+        /// If that's not the case, they will be sorted on the fly.
+        pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+            let backing = packed::Backing::InMemory(bytes.into());
+            Self::open_with_backing(backing, PathBuf::from("<memory>"))
         }
     }
 

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, convert::TryFrom, fmt::Display, str::FromStr};
+use std::{borrow::Cow, fmt::Display, str::FromStr};
 
 use bstr::{BStr, BString};
 
@@ -67,6 +67,11 @@ impl TryFrom<&BStr> for Integer {
             return Err(int_err(s));
         }
 
+        let last_idx = s.len() - 1;
+        if !s.is_char_boundary(last_idx) {
+            return Err(int_err(s));
+        }
+
         let (number, suffix) = s.split_at(s.len() - 1);
         if let (Ok(value), Ok(suffix)) = (number.parse(), suffix.parse()) {
             Ok(Self {
@@ -87,7 +92,7 @@ impl TryFrom<Cow<'_, BStr>> for Integer {
     }
 }
 
-/// Integer suffixes that are supported by `gix-config`.
+/// Integer suffixes that are supported by `git-config`.
 ///
 /// These values are base-2 unit of measurements, not the base-10 variants.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]

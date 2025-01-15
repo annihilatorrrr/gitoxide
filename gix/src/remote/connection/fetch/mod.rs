@@ -43,22 +43,26 @@ impl RefLogMessage {
 pub enum Status {
     /// Nothing changed as the remote didn't have anything new compared to our tracking branches, thus no pack was received
     /// and no new object was added.
+    ///
+    /// As we could determine that nothing changed without remote interaction, there was no negotiation at all.
     NoPackReceived {
+        /// If `true`, we didn't receive a pack due to dry-run mode being enabled.
+        dry_run: bool,
+        /// Information about the pack negotiation phase if negotiation happened at all.
+        ///
+        /// It's possible that negotiation didn't have to happen as no reference of interest changed on the server.
+        negotiate: Option<outcome::Negotiate>,
         /// However, depending on the refspecs, references might have been updated nonetheless to point to objects as
         /// reported by the remote.
         update_refs: refs::update::Outcome,
     },
     /// There was at least one tip with a new object which we received.
     Change {
+        /// Information about the pack negotiation phase.
+        negotiate: outcome::Negotiate,
         /// Information collected while writing the pack and its index.
         write_pack_bundle: gix_pack::bundle::write::Outcome,
         /// Information collected while updating references.
-        update_refs: refs::update::Outcome,
-    },
-    /// A dry run was performed which leaves the local repository without any change
-    /// nor will a pack have been received.
-    DryRun {
-        /// Information about what updates to refs would have been done.
         update_refs: refs::update::Outcome,
     },
 }
@@ -68,31 +72,27 @@ pub enum Status {
 pub struct Outcome {
     /// The result of the initial mapping of references, the prerequisite for any fetch.
     pub ref_map: RefMap,
+    /// The outcome of the handshake with the server.
+    pub handshake: gix_protocol::handshake::Outcome,
     /// The status of the operation to indicate what happened.
     pub status: Status,
 }
 
-/// The progress ids used in during various steps of the fetch operation.
-///
-/// Note that tagged progress isn't very widely available yet, but support can be improved as needed.
-///
-/// Use this information to selectively extract the progress of interest in case the parent application has custom visualization.
-#[derive(Debug, Copy, Clone)]
-pub enum ProgressId {
-    /// The progress name is defined by the remote and the progress messages it sets, along with their progress values and limits.
-    RemoteProgress,
-}
-
-impl From<ProgressId> for gix_features::progress::Id {
-    fn from(v: ProgressId) -> Self {
-        match v {
-            ProgressId::RemoteProgress => *b"FERP",
-        }
+/// Additional types related to the outcome of a fetch operation.
+pub mod outcome {
+    /// Information about the negotiation phase of a fetch.
+    ///
+    /// Note that negotiation can happen even if no pack is ultimately produced.
+    #[derive(Default, Debug, Clone)]
+    pub struct Negotiate {
+        /// The negotiation graph indicating what kind of information 'the algorithm' collected in the end.
+        pub graph: gix_negotiate::IdMap,
+        /// Additional information for each round of negotiation.
+        pub rounds: Vec<gix_protocol::fetch::negotiate::Round>,
     }
 }
 
-///
-pub mod negotiate;
+pub use gix_protocol::fetch::ProgressId;
 
 ///
 pub mod prepare {
@@ -116,16 +116,15 @@ pub mod prepare {
     }
 }
 
-impl<'remote, 'repo, T, P> Connection<'remote, 'repo, T, P>
+impl<'remote, 'repo, T> Connection<'remote, 'repo, T>
 where
     T: Transport,
-    P: Progress,
 {
     /// Perform a handshake with the remote and obtain a ref-map with `options`, and from there one
     /// Note that at this point, the `transport` should already be configured using the [`transport_mut()`][Self::transport_mut()]
     /// method, as it will be consumed here.
     ///
-    /// From there additional properties of the fetch can be adjusted to override the defaults that are configured via gix-config.
+    /// From there additional properties of the fetch can be adjusted to override the defaults that are configured via git-config.
     ///
     /// # Async Experimental
     ///
@@ -137,27 +136,29 @@ where
     #[gix_protocol::maybe_async::maybe_async]
     pub async fn prepare_fetch(
         mut self,
+        progress: impl Progress,
         options: ref_map::Options,
-    ) -> Result<Prepare<'remote, 'repo, T, P>, prepare::Error> {
-        if self.remote.refspecs(remote::Direction::Fetch).is_empty() {
+    ) -> Result<Prepare<'remote, 'repo, T>, prepare::Error> {
+        if self.remote.refspecs(remote::Direction::Fetch).is_empty() && options.extra_refspecs.is_empty() {
             return Err(prepare::Error::MissingRefSpecs);
         }
-        let ref_map = self.ref_map_inner(options).await?;
+        let ref_map = self.ref_map_by_ref(progress, options).await?;
         Ok(Prepare {
             con: Some(self),
             ref_map,
             dry_run: DryRun::No,
             reflog_message: None,
             write_packed_refs: WritePackedRefs::Never,
+            shallow: Default::default(),
         })
     }
 }
 
-impl<'remote, 'repo, T, P> Prepare<'remote, 'repo, T, P>
+impl<T> Prepare<'_, '_, T>
 where
     T: Transport,
 {
-    /// Return the ref_map (that includes the server handshake) which was part of listing refs prior to fetching a pack.
+    /// Return the `ref_map` (that includes the server handshake) which was part of listing refs prior to fetching a pack.
     pub fn ref_map(&self) -> &RefMap {
         &self.ref_map
     }
@@ -170,19 +171,20 @@ mod receive_pack;
 pub mod refs;
 
 /// A structure to hold the result of the handshake with the remote and configure the upcoming fetch operation.
-pub struct Prepare<'remote, 'repo, T, P>
+pub struct Prepare<'remote, 'repo, T>
 where
     T: Transport,
 {
-    con: Option<Connection<'remote, 'repo, T, P>>,
+    con: Option<Connection<'remote, 'repo, T>>,
     ref_map: RefMap,
     dry_run: DryRun,
     reflog_message: Option<RefLogMessage>,
     write_packed_refs: WritePackedRefs,
+    shallow: remote::fetch::Shallow,
 }
 
 /// Builder
-impl<'remote, 'repo, T, P> Prepare<'remote, 'repo, T, P>
+impl<T> Prepare<'_, '_, T>
 where
     T: Transport,
 {
@@ -212,29 +214,12 @@ where
         self.reflog_message = reflog_message.into();
         self
     }
-}
 
-impl<'remote, 'repo, T, P> Drop for Prepare<'remote, 'repo, T, P>
-where
-    T: Transport,
-{
-    fn drop(&mut self) {
-        if let Some(mut con) = self.con.take() {
-            #[cfg(feature = "async-network-client")]
-            {
-                // TODO: this should be an async drop once the feature is available.
-                //       Right now we block the executor by forcing this communication, but that only
-                //       happens if the user didn't actually try to receive a pack, which consumes the
-                //       connection in an async context.
-                gix_protocol::futures_lite::future::block_on(gix_protocol::indicate_end_of_interaction(
-                    &mut con.transport,
-                ))
-                .ok();
-            }
-            #[cfg(not(feature = "async-network-client"))]
-            {
-                gix_protocol::indicate_end_of_interaction(&mut con.transport).ok();
-            }
-        }
+    /// Define what to do when the current repository is a shallow clone.
+    ///
+    /// *Has no effect if the current repository is not as shallow clone.*
+    pub fn with_shallow(mut self, shallow: remote::fetch::Shallow) -> Self {
+        self.shallow = shallow;
+        self
     }
 }

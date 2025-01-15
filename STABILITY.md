@@ -34,55 +34,55 @@ our [collaboration guide].
 The following schematic helps to visualize what follows.
 
 ```text
-                Release Software v1.X                 
-    Stability Tier 1 ═════════════════════════════╗   
-    ║                                             ║   
-    ║    gix──────────────┐ ein──────────────┐    ║   
-    ║    │  plumbing app  │ │  porcelain app │    ║   
-    ║    └────────────────┘ └────────────────┘    ║   
-    ║             │                  │            ║   
-    ║             ▼                  ▼            ║   
-    ║    gitoxide-core───────────────────────┐    ║   
-    ║    │        application functionality  │    ║   
-    ║    └───────────────────────────────────┘    ║   
-    ║                      │                      ║   
-    ║                      ▼                      ║   
-    ║    gix   ──────────────────────────────┐    ║   
-    ║    │                application crate  │─ ─ ╬ ─ 
+                Release Software v1.X
+    Stability Tier 1 ═════════════════════════════╗
+    ║                                             ║
+    ║    gix──────────────┐ ein──────────────┐    ║
+    ║    │  plumbing app  │ │  porcelain app │    ║
+    ║    └────────────────┘ └────────────────┘    ║
+    ║             │                  │            ║
+    ║             ▼                  ▼            ║
+    ║    gitoxide-core───────────────────────┐    ║
+    ║    │        application functionality  │    ║
+    ║    └───────────────────────────────────┘    ║
+    ║                      │                      ║
+    ║                      ▼                      ║
+    ║    gix   ──────────────────────────────┐    ║
+    ║    │                application crate  │─ ─ ╬ ─
     ║    └───────────────────────────────────┘    ║  │
-    ║                      │                      ║   
+    ║                      │                      ║
     ║                      ▼                      ║  │
-    ║    Foundation Crates───────────────────┐    ║   
+    ║    Foundation Crates───────────────────┐    ║
     ║    │ ┌─────────────┐   ┌─────────────┐ │    ║  │
-    ║    │ │  gix-hash   │   │  gix-actor  │ │    ║   
+    ║    │ │  gix-hash   │   │  gix-actor  │ │    ║
     ║    │ └─────────────┘   └─────────────┘ │    ║  │
-    ║    │ ┌─────────────┐   ┌─────────────┐ │    ║   
+    ║    │ ┌─────────────┐   ┌─────────────┐ │    ║
     ║    │ │   gix-ref   │   │ gix-config  │ │    ║  │
-    ║    │ └─────────────┘   └─────────────┘ │    ║   
+    ║    │ └─────────────┘   └─────────────┘ │    ║
     ║    │ ┌─────────────┐   ┌─────────────┐ │    ║  │
-    ║    │ │ gix-object  │   │  gix-lock   │ │    ║   
+    ║    │ │ gix-object  │   │  gix-lock   │ │    ║
     ║    │ └─────────────┘   └─────────────┘ │    ║  │
-    ║    │ ┌───────────────────────────────┐ │    ║   
+    ║    │ ┌───────────────────────────────┐ │    ║
     ║    │ │         gix-features          │ │    ║  │
-    ║    │ └───────────────────────────────┘ │    ║   
+    ║    │ └───────────────────────────────┘ │    ║
     ║    └───────────────────────────────────┘    ║  │
-    ║                                             ║   
+    ║                                             ║
     ╚═════════════════════════════════════════════╝  │
-                                                      
+
     Stability Tier 2 ─────────────────────────────┐  │
-    │                                             │   
+    │                                             │
     │    Plumbing Crates─────────────────────┐    │  │
-    │    │ ┌─────────────┐   ┌─────────────┐ │    │   
+    │    │ ┌─────────────┐   ┌─────────────┐ │    │
     │    │ │   gix-odb   │   │  gix-diff   │ │    │  │
-    │    │ └─────────────┘   └─────────────┘ │    │   
+    │    │ └─────────────┘   └─────────────┘ │    │
     │    │ ┌─────────────┐   ┌─────────────┐ │    │  │
-    │    │ │gix-traverse │   │  gix-pack   │ │◀ ─ ┼ ─ 
-    │    │ └─────────────┘   └─────────────┘ │    │   
-    │    │ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐ │    │   
-    │    │            …many more…            │    │   
-    │    │ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘ │    │   
-    │    └───────────────────────────────────┘    │   
-    │                                             │   
+    │    │ │gix-traverse │   │  gix-pack   │ │◀ ─ ┼ ─
+    │    │ └─────────────┘   └─────────────┘ │    │
+    │    │ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐ │    │
+    │    │            …many more…            │    │
+    │    │ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘ │    │
+    │    └───────────────────────────────────┘    │
+    │                                             │
     └─────────────────────────────────────────────┘
 ```
 
@@ -96,6 +96,8 @@ It's acceptable to let each breaking change be immediately followed by a minor v
 
 Released plumbing crates are marked with major version number 1 or above, for example `1.2.4` and live in stability tier 2 _(->ST2)_.
 
+*These crates may not expose parts of unstable crates in their public API*.
+
 Breaking changes are collected and may be released no more often than every 4 weeks by incrementing the major version number.
 
 For example, `gix-odb` and `gix-ref` both have breaking changes, where `gix-odb`'s change is on August 1st and `gix-ref`'s dependent change
@@ -106,7 +108,7 @@ If there are additional breaking changes without a release, these push back the 
 ### Tier 1: released apps and application crates
 
 Released apps and application crates are marked with major version number 1 or above, like `2.3.0+21.06` and live in tier 1 _(->ST1)_,
-with the build identifiers for year (`21`) and and month `06` appended, based on the actual release year and month.
+with the build identifiers for year (`21`) and month `06` appended, based on the actual release year and month.
 
 Breaking changes are collected and may be released no more often than every 6 months by incrementing the major version number. If there are additional breaking changes,
 these push bac the release date so that they can be tested at least for 3 months. For example, a breaking change happens in January 01, and another breaking change in February 15.
@@ -126,7 +128,7 @@ Minor version updates for new features can be released when needed assuming ther
 The MSRV is automatically assumed to be the latest stable version for all crates with the following exception: `gix` and all it's dependencies must
 adhere to an MSRV, as validated by the `msrv.yml` GitHub workflow.
 
-Increasing the MSRV is considered a breaking change and warrants a major version bump itself for stable crates and a minor version bump for IDP crates.
+Increasing the MSRV is *not* considered a breaking change like is the case for most other crates in the community.
 
 Please let us know if you have other requirement and we see if we can provide stability guarantees for it or reduce the MSRV to a given version.
 
@@ -149,4 +151,4 @@ Apps and application crates may take longer as they are larger in scope. A good 
 use. Their scope should also be narrowed to a minimal viable product.
 
 [semver]: https://semver.org
-[collaboration guide]: https://github.com/Byron/gitoxide/blob/main/COLLABORATING.md
+[collaboration guide]: https://github.com/GitoxideLabs/gitoxide/blob/main/COLLABORATING.md

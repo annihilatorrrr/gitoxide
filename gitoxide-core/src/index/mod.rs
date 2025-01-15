@@ -5,13 +5,10 @@ pub struct Options {
     pub format: crate::OutputFormat,
 }
 
-mod entries;
-pub use entries::entries;
-
 pub mod information;
 
 fn parse_file(index_path: impl AsRef<Path>, object_hash: gix::hash::Kind) -> anyhow::Result<gix::index::File> {
-    gix::index::File::at(index_path.as_ref(), object_hash, Default::default()).map_err(Into::into)
+    gix::index::File::at(index_path.as_ref(), object_hash, false, Default::default()).map_err(Into::into)
 }
 
 pub mod checkout_exclusive {
@@ -38,15 +35,15 @@ pub fn verify(
     let file = parse_file(index_path, object_hash)?;
     file.verify_integrity()?;
     file.verify_entries()?;
-    file.verify_extensions(false, gix::index::verify::extensions::no_find)?;
-    #[cfg_attr(not(feature = "serde1"), allow(irrefutable_let_patterns))]
+    file.verify_extensions(false, gix::objs::find::Never)?;
+    #[cfg_attr(not(feature = "serde"), allow(irrefutable_let_patterns))]
     if let crate::OutputFormat::Human = format {
         writeln!(out, "OK").ok();
     }
     Ok(())
 }
 
-#[cfg_attr(not(feature = "serde1"), allow(unused_variables, unused_mut))]
+#[cfg_attr(not(feature = "serde"), allow(unused_variables, unused_mut))]
 pub fn information(
     index_path: impl AsRef<Path>,
     out: impl std::io::Write,
@@ -60,7 +57,7 @@ pub fn information(
     }: information::Options,
 ) -> anyhow::Result<()> {
     use crate::OutputFormat::*;
-    #[cfg(feature = "serde1")]
+    #[cfg(feature = "serde")]
     if let Human = format {
         writeln!(err, "Defaulting to JSON printing as nothing else will be implemented.").ok();
         format = Json;
@@ -69,7 +66,7 @@ pub fn information(
         Human => {
             anyhow::bail!("Cannot print information using 'human' format.")
         }
-        #[cfg(feature = "serde1")]
+        #[cfg(feature = "serde")]
         Json => {
             let info = information::Collection::try_from_file(parse_file(index_path, object_hash)?, extension_details)?;
             serde_json::to_writer_pretty(out, &info)?;

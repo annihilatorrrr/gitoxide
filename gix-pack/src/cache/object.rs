@@ -1,16 +1,12 @@
-//! # Note
-//!
-//! This module is a bit 'misplaced' if spelled out like 'gix_pack::cache::object::*' but is best placed here for code re-use and
+//! This module is a bit 'misplaced' if spelled out like '`gix_pack::cache::object::`*' but is best placed here for code reuse and
 //! general usefulness.
 use crate::cache;
 
 #[cfg(feature = "object-cache-dynamic")]
 mod memory {
-    use std::num::NonZeroUsize;
-
+    use crate::{cache, cache::set_vec_to_slice};
     use clru::WeightScale;
-
-    use crate::cache;
+    use std::num::NonZeroUsize;
 
     struct Entry {
         data: Vec<u8>,
@@ -45,7 +41,7 @@ mod memory {
             MemoryCappedHashmap {
                 inner: clru::CLruCache::with_config(
                     clru::CLruCacheConfig::new(NonZeroUsize::new(memory_cap_in_bytes).expect("non zero"))
-                        .with_hasher(gix_hashtable::hash::Builder::default())
+                        .with_hasher(gix_hashtable::hash::Builder)
                         .with_scale(CustomScale),
                 ),
                 free_list: Vec::new(),
@@ -58,37 +54,27 @@ mod memory {
         /// Put the object going by `id` of `kind` with `data` into the cache.
         fn put(&mut self, id: gix_hash::ObjectId, kind: gix_object::Kind, data: &[u8]) {
             self.debug.put();
-            if let Ok(Some(previous_entry)) = self.inner.put_with_weight(
-                id,
-                Entry {
-                    data: self
-                        .free_list
-                        .pop()
-                        .map(|mut v| {
-                            v.clear();
-                            v.resize(data.len(), 0);
-                            v.copy_from_slice(data);
-                            v
-                        })
-                        .unwrap_or_else(|| Vec::from(data)),
-                    kind,
-                },
-            ) {
-                self.free_list.push(previous_entry.data)
+            let Some(data) = set_vec_to_slice(self.free_list.pop().unwrap_or_default(), data) else {
+                return;
+            };
+            let res = self.inner.put_with_weight(id, Entry { data, kind });
+            match res {
+                Ok(Some(previous_entry)) => self.free_list.push(previous_entry.data),
+                Ok(None) => {}
+                Err((_key, value)) => self.free_list.push(value.data),
             }
         }
 
         /// Try to retrieve the object named `id` and place its data into `out` if available and return `Some(kind)` if found.
         fn get(&mut self, id: &gix_hash::ObjectId, out: &mut Vec<u8>) -> Option<gix_object::Kind> {
-            let res = self.inner.get(id).map(|e| {
-                out.resize(e.data.len(), 0);
-                out.copy_from_slice(&e.data);
-                e.kind
+            let res = self.inner.get(id).and_then(|e| {
+                set_vec_to_slice(out, &e.data)?;
+                Some(e.kind)
             });
             if res.is_some() {
-                self.debug.hit()
+                self.debug.hit();
             } else {
-                self.debug.miss()
+                self.debug.miss();
             }
             res
         }
@@ -113,7 +99,7 @@ impl cache::Object for Never {
 impl<T: cache::Object + ?Sized> cache::Object for Box<T> {
     fn put(&mut self, id: gix_hash::ObjectId, kind: gix_object::Kind, data: &[u8]) {
         use std::ops::DerefMut;
-        self.deref_mut().put(id, kind, data)
+        self.deref_mut().put(id, kind, data);
     }
 
     fn get(&mut self, id: &gix_hash::ObjectId, out: &mut Vec<u8>) -> Option<gix_object::Kind> {

@@ -5,7 +5,7 @@ use crate::data;
 
 /// The header portion of a pack data entry, identifying the kind of stored object.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[allow(missing_docs)]
 pub enum Header {
     /// The object is a commit
@@ -83,7 +83,7 @@ impl Header {
     ///
     /// Returns the amount of bytes written to `out`.
     /// `decompressed_size_in_bytes` is the full size in bytes of the object that this header represents
-    pub fn write_to(&self, decompressed_size_in_bytes: u64, mut out: impl io::Write) -> io::Result<usize> {
+    pub fn write_to(&self, decompressed_size_in_bytes: u64, out: &mut dyn io::Write) -> io::Result<usize> {
         let mut size = decompressed_size_in_bytes;
         let mut written = 1;
         let mut c: u8 = (self.as_type_id() << 4) | (size as u8 & 0b0000_1111);
@@ -115,7 +115,7 @@ impl Header {
 
     /// The size of the header in bytes when serialized
     pub fn size(&self, decompressed_size: u64) -> usize {
-        self.write_to(decompressed_size, io::sink())
+        self.write_to(decompressed_size, &mut io::sink())
             .expect("io::sink() to never fail")
     }
 }

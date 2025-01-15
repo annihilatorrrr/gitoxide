@@ -5,10 +5,7 @@ use std::{
     path::Path,
 };
 
-use crate::{
-    file::{self, File},
-    GENERATION_NUMBER_INFINITY, GENERATION_NUMBER_MAX,
-};
+use crate::{file, File, GENERATION_NUMBER_INFINITY, GENERATION_NUMBER_MAX};
 
 /// The error used in [`File::traverse()`].
 #[derive(thiserror::Error, Debug)]
@@ -47,7 +44,7 @@ pub enum Error<E: std::error::Error + 'static> {
 
 /// The positive result of [`File::traverse()`] providing some statistical information.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde1", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Outcome {
     /// The largest encountered [`file::Commit`] generation number.
     pub max_generation: u32,
@@ -150,7 +147,7 @@ impl File {
         let data_len_without_trailer = self.data.len() - self.hash_len;
         let mut hasher = gix_features::hash::hasher(self.object_hash());
         hasher.update(&self.data[..data_len_without_trailer]);
-        let actual = gix_hash::ObjectId::from(hasher.digest().as_ref());
+        let actual = gix_hash::ObjectId::from_bytes_or_panic(hasher.digest().as_ref());
 
         let expected = self.checksum();
         if actual == expected {
@@ -163,10 +160,9 @@ impl File {
 
 /// If the given path's filename matches "graph-{hash}.graph", check that `hash` matches the
 /// expected hash.
-fn verify_split_chain_filename_hash(path: impl AsRef<Path>, expected: &gix_hash::oid) -> Result<(), String> {
-    let path = path.as_ref();
+fn verify_split_chain_filename_hash(path: &Path, expected: &gix_hash::oid) -> Result<(), String> {
     path.file_name()
-        .and_then(|filename| filename.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .and_then(|filename| filename.strip_suffix(".graph"))
         .and_then(|stem| stem.strip_prefix("graph-"))
         .map_or(Ok(()), |hex| match gix_hash::ObjectId::from_hex(hex.as_bytes()) {

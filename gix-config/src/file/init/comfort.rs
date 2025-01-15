@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::borrow::Cow;
 
 use crate::{
     file::{init, Metadata},
@@ -17,33 +17,37 @@ use crate::{
 impl File<'static> {
     /// Open all global configuration files which involves the following sources:
     ///
-    /// * [system][crate::Source::System]
-    /// * [git][crate::Source::Git]
-    /// * [user][crate::Source::User]
+    /// * [git-installation](source::Kind::GitInstallation)
+    /// * [system](source::Kind::System)
+    /// * [globals](source::Kind::Global)
     ///
     /// which excludes repository local configuration, as well as override-configuration from environment variables.
     ///
     /// Note that the file might [be empty][File::is_void()] in case no configuration file was found.
     pub fn from_globals() -> Result<File<'static>, init::from_paths::Error> {
-        let metas = [source::Kind::System, source::Kind::Global]
-            .iter()
-            .flat_map(|kind| kind.sources())
-            .filter_map(|source| {
-                let path = source
-                    .storage_location(&mut |name| std::env::var_os(name))
-                    .and_then(|p| p.is_file().then_some(p))
-                    .map(|p| p.into_owned());
+        let metas = [
+            source::Kind::GitInstallation,
+            source::Kind::System,
+            source::Kind::Global,
+        ]
+        .iter()
+        .flat_map(|kind| kind.sources())
+        .filter_map(|source| {
+            let path = source
+                .storage_location(&mut gix_path::env::var)
+                .and_then(|p| p.is_file().then_some(p))
+                .map(Cow::into_owned);
 
-                Metadata {
-                    path,
-                    source: *source,
-                    level: 0,
-                    trust: gix_sec::Trust::Full,
-                }
-                .into()
-            });
+            Metadata {
+                path,
+                source: *source,
+                level: 0,
+                trust: gix_sec::Trust::Full,
+            }
+            .into()
+        });
 
-        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let home = gix_path::env::home_dir();
         let options = init::Options {
             includes: init::includes::Options::follow_without_conditional(home.as_deref()),
             ..Default::default()
@@ -55,11 +59,11 @@ impl File<'static> {
     /// A typical use of this is to [`append`][File::append()] this configuration to another one with lower
     /// precedence to obtain overrides.
     ///
-    /// See [`gix-config`'s documentation] for more information on the environment variables in question.
+    /// See [`git-config`'s documentation] for more information on the environment variables in question.
     ///
-    /// [`gix-config`'s documentation]: https://git-scm.com/docs/gix-config#Documentation/gix-config.txt-GITCONFIGCOUNT
+    /// [`git-config`'s documentation]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-GITCONFIGCOUNT
     pub fn from_environment_overrides() -> Result<File<'static>, init::from_env::Error> {
-        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let home = gix_path::env::home_dir();
         let options = init::Options {
             includes: init::includes::Options::follow_without_conditional(home.as_deref()),
             ..Default::default()
@@ -82,26 +86,26 @@ impl File<'static> {
     ///
     /// Includes will be resolved within limits as some information like the git installation directory is missing to interpolate
     /// paths with as well as git repository information like the branch name.
-    pub fn from_git_dir(dir: impl Into<std::path::PathBuf>) -> Result<File<'static>, from_git_dir::Error> {
+    pub fn from_git_dir(dir: std::path::PathBuf) -> Result<File<'static>, from_git_dir::Error> {
         let (mut local, git_dir) = {
             let source = Source::Local;
-            let mut path = dir.into();
+            let mut path = dir;
             path.push(
                 source
-                    .storage_location(&mut |n| std::env::var_os(n))
+                    .storage_location(&mut gix_path::env::var)
                     .expect("location available for local"),
             );
-            let local = Self::from_path_no_includes(&path, source)?;
+            let local = Self::from_path_no_includes(path.clone(), source)?;
             path.pop();
             (local, path)
         };
 
-        let worktree = match local.boolean("extensions", None, "worktreeConfig") {
+        let worktree = match local.boolean("extensions.worktreeConfig") {
             Some(Ok(worktree_config)) => worktree_config.then(|| {
                 let source = Source::Worktree;
                 let path = git_dir.join(
                     source
-                        .storage_location(&mut |n| std::env::var_os(n))
+                        .storage_location(&mut gix_path::env::var)
                         .expect("location available for worktree"),
                 );
                 Self::from_path_no_includes(path, source)
@@ -110,7 +114,7 @@ impl File<'static> {
         }
         .transpose()?;
 
-        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let home = gix_path::env::home_dir();
         let options = init::Options {
             includes: init::includes::Options::follow(
                 path::interpolate::Context {
@@ -122,7 +126,7 @@ impl File<'static> {
                     branch_name: None,
                 },
             ),
-            lossy: false,
+            ..Default::default()
         };
 
         let mut globals = Self::from_globals()?;

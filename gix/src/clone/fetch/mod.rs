@@ -1,9 +1,10 @@
-use crate::{bstr::BString, clone::PrepareFetch, Repository};
+use crate::bstr::BString;
+use crate::bstr::ByteSlice;
+use crate::clone::PrepareFetch;
 
 /// The error returned by [`PrepareFetch::fetch_only()`].
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
-#[cfg(feature = "blocking-network-client")]
 pub enum Error {
     #[error(transparent)]
     Connect(#[from] crate::remote::connect::Error),
@@ -15,8 +16,14 @@ pub enum Error {
     RemoteInit(#[from] crate::remote::init::Error),
     #[error("Custom configuration of remote to clone from failed")]
     RemoteConfiguration(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("Custom configuration of connection to use when cloning failed")]
+    RemoteConnection(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
     RemoteName(#[from] crate::config::remote::symbolic_name::Error),
+    #[error(transparent)]
+    ParseConfig(#[from] crate::config::overrides::Error),
+    #[error(transparent)]
+    ApplyConfig(#[from] crate::config::Error),
     #[error("Failed to load repo-local git configuration before writing")]
     LoadConfig(#[from] gix_config::file::init::from_paths::Error),
     #[error("Failed to store configured remote in memory")]
@@ -25,11 +32,18 @@ pub enum Error {
     SaveConfigIo(#[from] std::io::Error),
     #[error("The remote HEAD points to a reference named {head_ref_name:?} which is invalid.")]
     InvalidHeadRef {
-        source: gix_validate::refname::Error,
-        head_ref_name: BString,
+        source: gix_validate::reference::name::Error,
+        head_ref_name: crate::bstr::BString,
     },
     #[error("Failed to update HEAD with values from remote")]
     HeadUpdate(#[from] crate::reference::edit::Error),
+    #[error("The remote didn't have any ref that matched '{}'", wanted.as_ref().as_bstr())]
+    RefNameMissing { wanted: gix_ref::PartialName },
+    #[error("The remote has {} refs for '{}', try to use a specific name: {}", candidates.len(), wanted.as_ref().as_bstr(), candidates.iter().filter_map(|n| n.to_str().ok()).collect::<Vec<_>>().join(", "))]
+    RefNameAmbiguous {
+        wanted: gix_ref::PartialName,
+        candidates: Vec<BString>,
+    },
 }
 
 /// Modification
@@ -43,14 +57,19 @@ impl PrepareFetch {
     /// it was newly initialized.
     ///
     /// Note that all data we created will be removed once this instance drops if the operation wasn't successful.
-    #[cfg(feature = "blocking-network-client")]
-    pub fn fetch_only<P>(
+    ///
+    /// ### Note for users of `async`
+    ///
+    /// Even though `async` is technically supported, it will still be blocking in nature as it uses a lot of non-async writes
+    /// and computation under the hood. Thus it should be spawned into a runtime which can handle blocking futures.
+    #[gix_protocol::maybe_async::maybe_async]
+    pub async fn fetch_only<P>(
         &mut self,
-        progress: P,
+        mut progress: P,
         should_interrupt: &std::sync::atomic::AtomicBool,
-    ) -> Result<(Repository, crate::remote::fetch::Outcome), Error>
+    ) -> Result<(crate::Repository, crate::remote::fetch::Outcome), Error>
     where
-        P: crate::Progress,
+        P: crate::NestedProgress,
         P::SubProgress: 'static,
     {
         use crate::{bstr::ByteVec, remote, remote::fetch::RefLogMessage};
@@ -60,27 +79,35 @@ impl PrepareFetch {
             .as_mut()
             .expect("user error: multiple calls are allowed only until it succeeds");
 
+        if !self.config_overrides.is_empty() {
+            let mut snapshot = repo.config_snapshot_mut();
+            snapshot.append_config(&self.config_overrides, gix_config::Source::Api)?;
+            snapshot.commit()?;
+        }
+
         let remote_name = match self.remote_name.as_ref() {
             Some(name) => name.to_owned(),
             None => repo
                 .config
                 .resolved
-                .string("clone", None, crate::config::tree::Clone::DEFAULT_REMOTE_NAME.name)
+                .string(crate::config::tree::Clone::DEFAULT_REMOTE_NAME)
                 .map(|n| crate::config::tree::Clone::DEFAULT_REMOTE_NAME.try_into_symbolic_name(n))
                 .transpose()?
                 .unwrap_or_else(|| "origin".into()),
         };
 
-        let mut remote = repo
-            .remote_at(self.url.clone())?
-            .with_refspecs(
-                Some(format!("+refs/heads/*:refs/remotes/{remote_name}/*").as_str()),
-                remote::Direction::Fetch,
-            )
-            .expect("valid static spec");
+        let mut remote = repo.remote_at(self.url.clone())?;
+        if remote.fetch_specs.is_empty() {
+            remote = remote
+                .with_refspecs(
+                    Some(format!("+refs/heads/*:refs/remotes/{remote_name}/*").as_str()),
+                    remote::Direction::Fetch,
+                )
+                .expect("valid static spec");
+        }
         let mut clone_fetch_tags = None;
         if let Some(f) = self.configure_remote.as_mut() {
-            remote = f(remote).map_err(|err| Error::RemoteConfiguration(err))?;
+            remote = f(remote).map_err(Error::RemoteConfiguration)?;
         } else {
             clone_fetch_tags = remote::fetch::Tags::All.into();
         }
@@ -92,22 +119,69 @@ impl PrepareFetch {
             remote = remote.with_fetch_tags(fetch_tags);
         }
 
-        // Add HEAD after the remote was written to config, we need it to know what to checkout later, and assure
+        // Add HEAD after the remote was written to config, we need it to know what to check out later, and assure
         // the ref that HEAD points to is present no matter what.
+        let head_local_tracking_branch = format!("refs/remotes/{remote_name}/HEAD");
         let head_refspec = gix_refspec::parse(
-            format!("HEAD:refs/remotes/{remote_name}/HEAD").as_str().into(),
+            format!("HEAD:{head_local_tracking_branch}").as_str().into(),
             gix_refspec::parse::Operation::Fetch,
         )
         .expect("valid")
         .to_owned();
-        let pending_pack: remote::fetch::Prepare<'_, '_, _, _> =
-            remote.connect(remote::Direction::Fetch, progress)?.prepare_fetch({
+        let pending_pack: remote::fetch::Prepare<'_, '_, _> = {
+            let mut connection = remote.connect(remote::Direction::Fetch).await?;
+            if let Some(f) = self.configure_connection.as_mut() {
+                f(&mut connection).map_err(Error::RemoteConnection)?;
+            }
+            let mut fetch_opts = {
                 let mut opts = self.fetch_options.clone();
                 if !opts.extra_refspecs.contains(&head_refspec) {
-                    opts.extra_refspecs.push(head_refspec)
+                    opts.extra_refspecs.push(head_refspec.clone());
+                }
+                if let Some(ref_name) = &self.ref_name {
+                    opts.extra_refspecs.push(
+                        gix_refspec::parse(ref_name.as_ref().as_bstr(), gix_refspec::parse::Operation::Fetch)
+                            .expect("partial names are valid refspecs")
+                            .to_owned(),
+                    );
                 }
                 opts
-            })?;
+            };
+            match connection.prepare_fetch(&mut progress, fetch_opts.clone()).await {
+                Ok(prepare) => prepare,
+                Err(remote::fetch::prepare::Error::RefMap(remote::ref_map::Error::InitRefMap(
+                    gix_protocol::fetch::refmap::init::Error::MappingValidation(err),
+                ))) if err.issues.len() == 1
+                    && fetch_opts.extra_refspecs.contains(&head_refspec)
+                    && matches!(
+                        err.issues.first(),
+                        Some(gix_refspec::match_group::validate::Issue::Conflict {
+                            destination_full_ref_name,
+                            ..
+                        }) if *destination_full_ref_name == head_local_tracking_branch
+                    ) =>
+                {
+                    let head_refspec_idx = fetch_opts
+                        .extra_refspecs
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, spec)| (*spec == head_refspec).then_some(idx))
+                        .expect("it's contained");
+                    // On the very special occasion that we fail as there is a remote `refs/heads/HEAD` reference that clashes
+                    // with our implicit refspec, retry without it. Maybe this tells us that we shouldn't have that implicit
+                    // refspec, as git can do this without connecting twice.
+                    let connection = remote.connect(remote::Direction::Fetch).await?;
+                    fetch_opts.extra_refspecs.remove(head_refspec_idx);
+                    connection.prepare_fetch(&mut progress, fetch_opts).await?
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
+
+        // Assure problems with custom branch names fail early, not after getting the pack or during negotiation.
+        if let Some(ref_name) = &self.ref_name {
+            util::find_custom_refname(pending_pack.ref_map(), ref_name)?;
+        }
         if pending_pack.ref_map().object_hash != repo.object_hash() {
             unimplemented!("configure repository to expect a different object hash as advertised by the server")
         }
@@ -121,92 +195,42 @@ impl PrepareFetch {
             .with_reflog_message(RefLogMessage::Override {
                 message: reflog_message.clone(),
             })
-            .receive(should_interrupt)?;
+            .with_shallow(self.shallow.clone())
+            .receive(&mut progress, should_interrupt)
+            .await?;
 
         util::append_config_to_repo_config(repo, config);
         util::update_head(
             repo,
-            &outcome.ref_map.remote_refs,
+            &outcome.ref_map,
             reflog_message.as_ref(),
             remote_name.as_ref(),
+            self.ref_name.as_ref(),
         )?;
 
         Ok((self.repo.take().expect("still present"), outcome))
     }
 
     /// Similar to [`fetch_only()`][Self::fetch_only()`], but passes ownership to a utility type to configure a checkout operation.
-    #[cfg(feature = "blocking-network-client")]
+    #[cfg(all(feature = "worktree-mutation", feature = "blocking-network-client"))]
     pub fn fetch_then_checkout<P>(
         &mut self,
         progress: P,
         should_interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<(crate::clone::PrepareCheckout, crate::remote::fetch::Outcome), Error>
     where
-        P: crate::Progress,
+        P: crate::NestedProgress,
         P::SubProgress: 'static,
     {
         let (repo, fetch_outcome) = self.fetch_only(progress, should_interrupt)?;
-        Ok((crate::clone::PrepareCheckout { repo: repo.into() }, fetch_outcome))
+        Ok((
+            crate::clone::PrepareCheckout {
+                repo: repo.into(),
+                ref_name: self.ref_name.clone(),
+            },
+            fetch_outcome,
+        ))
     }
 }
 
-/// Builder
-impl PrepareFetch {
-    /// Set additional options to adjust parts of the fetch operation that are not affected by the git configuration.
-    #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
-    pub fn with_fetch_options(mut self, opts: crate::remote::ref_map::Options) -> Self {
-        self.fetch_options = opts;
-        self
-    }
-    /// Use `f` to apply arbitrary changes to the remote that is about to be used to fetch a pack.
-    ///
-    /// The passed in `remote` will be un-named and pre-configured to be a default remote as we know it from git-clone.
-    /// It is not yet present in the configuration of the repository,
-    /// but each change it will eventually be written to the configuration prior to performing a the fetch operation,
-    /// _all changes done in `f()` will be persisted_.
-    ///
-    /// It can also be used to configure additional options, like those for fetching tags. Note that
-    /// [with_fetch_tags()][crate::Remote::with_fetch_tags()] should be called here to configure the clone as desired.
-    /// Otherwise a clone is configured to be complete and fetches all tags, not only those reachable from all branches.
-    pub fn configure_remote(
-        mut self,
-        f: impl FnMut(crate::Remote<'_>) -> Result<crate::Remote<'_>, Box<dyn std::error::Error + Send + Sync>> + 'static,
-    ) -> Self {
-        self.configure_remote = Some(Box::new(f));
-        self
-    }
-
-    /// Set the remote's name to the given value after it was configured using the function provided via
-    /// [`configure_remote()`][Self::configure_remote()].
-    ///
-    /// If not set here, it defaults to `origin` or the value of `clone.defaultRemoteName`.
-    pub fn with_remote_name(mut self, name: impl Into<BString>) -> Result<Self, crate::remote::name::Error> {
-        self.remote_name = Some(crate::remote::name::validated(name)?);
-        Ok(self)
-    }
-}
-
-/// Consumption
-impl PrepareFetch {
-    /// Persist the contained repository as is even if an error may have occurred when fetching from the remote.
-    pub fn persist(mut self) -> Repository {
-        self.repo.take().expect("present and consumed once")
-    }
-}
-
-impl Drop for PrepareFetch {
-    fn drop(&mut self) {
-        if let Some(repo) = self.repo.take() {
-            std::fs::remove_dir_all(repo.work_dir().unwrap_or_else(|| repo.path())).ok();
-        }
-    }
-}
-
-impl From<PrepareFetch> for Repository {
-    fn from(prep: PrepareFetch) -> Self {
-        prep.persist()
-    }
-}
-
-#[cfg(feature = "blocking-network-client")]
 mod util;

@@ -1,27 +1,23 @@
 use bstr::BStr;
 use gix_hash::{oid, ObjectId};
-use nom::{
-    bytes::complete::take_while1,
-    character::is_alphabetic,
-    combinator::{all_consuming, opt},
-    error::{context, ParseError},
+use winnow::{
+    combinator::{eof, opt, terminated},
+    error::{ParserError, StrContext},
+    prelude::*,
+    stream::AsChar,
+    token::take_while,
 };
 
 use crate::{bstr::ByteSlice, parse, parse::NL, tag::decode, Kind, TagRefIter};
 
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 pub(crate) enum State {
+    #[default]
     Target,
     TargetKind,
     Name,
     Tagger,
     Message,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State::Target
-    }
 }
 
 impl<'a> TagRefIter<'a> {
@@ -62,57 +58,60 @@ fn missing_field() -> crate::decode::Error {
 }
 
 impl<'a> TagRefIter<'a> {
-    fn next_inner(i: &'a [u8], state: &mut State) -> Result<(&'a [u8], Token<'a>), crate::decode::Error> {
+    #[inline]
+    fn next_inner(mut i: &'a [u8], state: &mut State) -> Result<(&'a [u8], Token<'a>), crate::decode::Error> {
+        let input = &mut i;
+        match Self::next_inner_(input, state) {
+            Ok(token) => Ok((*input, token)),
+            Err(err) => Err(crate::decode::Error::with_err(err, input)),
+        }
+    }
+
+    fn next_inner_(
+        input: &mut &'a [u8],
+        state: &mut State,
+    ) -> Result<Token<'a>, winnow::error::ErrMode<crate::decode::ParseError>> {
         use State::*;
         Ok(match state {
             Target => {
-                let (i, target) = context("object <40 lowercase hex char>", |i| {
-                    parse::header_field(i, b"object", parse::hex_hash)
-                })(i)?;
+                let target = (|i: &mut _| parse::header_field(i, b"object", parse::hex_hash))
+                    .context(StrContext::Expected("object <40 lowercase hex char>".into()))
+                    .parse_next(input)?;
                 *state = TargetKind;
-                (
-                    i,
-                    Token::Target {
-                        id: ObjectId::from_hex(target).expect("parsing validation"),
-                    },
-                )
+                Token::Target {
+                    id: ObjectId::from_hex(target).expect("parsing validation"),
+                }
             }
             TargetKind => {
-                let (i, kind) = context("type <object kind>", |i| {
-                    parse::header_field(i, b"type", take_while1(is_alphabetic))
-                })(i)?;
-                let kind = Kind::from_bytes(kind).map_err(|_| {
-                    #[allow(clippy::let_unit_value)]
-                    {
-                        let err = crate::decode::ParseError::from_error_kind(i, nom::error::ErrorKind::MapRes);
-                        nom::Err::Error(err)
-                    }
-                })?;
+                let kind = (|i: &mut _| parse::header_field(i, b"type", take_while(1.., AsChar::is_alpha)))
+                    .context(StrContext::Expected("type <object kind>".into()))
+                    .parse_next(input)?;
+                let kind = Kind::from_bytes(kind)
+                    .map_err(|_| winnow::error::ErrMode::from_error_kind(input, winnow::error::ErrorKind::Verify))?;
                 *state = Name;
-                (i, Token::TargetKind(kind))
+                Token::TargetKind(kind)
             }
             Name => {
-                let (i, tag_version) = context("tag <version>", |i| {
-                    parse::header_field(i, b"tag", take_while1(|b| b != NL[0]))
-                })(i)?;
+                let tag_version = (|i: &mut _| parse::header_field(i, b"tag", take_while(1.., |b| b != NL[0])))
+                    .context(StrContext::Expected("tag <version>".into()))
+                    .parse_next(input)?;
                 *state = Tagger;
-                (i, Token::Name(tag_version.as_bstr()))
+                Token::Name(tag_version.as_bstr())
             }
             Tagger => {
-                let (i, signature) = context(
-                    "tagger <signature>",
-                    opt(|i| parse::header_field(i, b"tagger", parse::signature)),
-                )(i)?;
+                let signature = opt(|i: &mut _| parse::header_field(i, b"tagger", parse::signature))
+                    .context(StrContext::Expected("tagger <signature>".into()))
+                    .parse_next(input)?;
                 *state = Message;
-                (i, Token::Tagger(signature))
+                Token::Tagger(signature)
             }
             Message => {
-                let (i, (message, pgp_signature)) = all_consuming(decode::message)(i)?;
+                let (message, pgp_signature) = terminated(decode::message, eof).parse_next(input)?;
                 debug_assert!(
-                    i.is_empty(),
+                    input.is_empty(),
                     "we should have consumed all data - otherwise iter may go forever"
                 );
-                return Ok((i, Token::Body { message, pgp_signature }));
+                Token::Body { message, pgp_signature }
             }
         })
     }
@@ -154,7 +153,7 @@ pub enum Token<'a> {
     },
 }
 
-impl<'a> Token<'a> {
+impl Token<'_> {
     /// Return the object id of this token if its a [Target][Token::Target].
     pub fn id(&self) -> Option<&oid> {
         match self {

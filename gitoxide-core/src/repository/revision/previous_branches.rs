@@ -14,10 +14,10 @@ pub fn previous_branches(
     match format {
         OutputFormat::Human => {
             for (name, id) in branches {
-                writeln!(out, "{} {}", id, name)?;
+                writeln!(out, "{id} {name}")?;
             }
         }
-        #[cfg(feature = "serde1")]
+        #[cfg(feature = "serde")]
         OutputFormat::Json => {
             serde_json::to_writer_pretty(&mut out, &branches)?;
         }

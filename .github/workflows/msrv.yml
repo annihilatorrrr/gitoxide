@@ -1,24 +1,43 @@
 name: Minimum Supported Rust Version
 
 on:
-  # Trigger the workflow on push to master or any pull request
-  # Ignore all tags
   push:
-    branches: [ main ]
-    tags-ignore: [ '*' ]
+    branches:
+      - main
+      - 'run-ci/**'
+      - '**/run-ci/**'
+    tags-ignore:
+      - '*'
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  rustfmt:
+  check-msrv:
     name: cargo check MSRV
+
     strategy:
       matrix:
         os:
-          - windows-2019
+          - windows-2022
           - ubuntu-latest
+
     runs-on: ${{ matrix.os }}
+
+    env:
+      # dictated by `firefox` to support the `helix` editor, but now probably effectively be controlled by `jiff`, which also aligns with `regex`.
+      # IMPORTANT: adjust etc/msrv-badge.svg as well
+      rust_version: 1.74.0
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@1.64.0 # dictated by `windows` crates effectively, IMPORTANT: adjust etc/msrv-badge.svg as well
-      - run: make check-msrv-on-ci
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: |
+          rustup toolchain install ${{ env.rust_version }} nightly --profile minimal --no-self-update
+          rustup default ${{ env.rust_version }}
+          cargo +nightly update -Zminimal-versions
+      - run: just ci-check-msrv

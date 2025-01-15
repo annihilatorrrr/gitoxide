@@ -1,5 +1,5 @@
 mod repo_with_small_packs {
-    use gix_odb::Find;
+    use gix_object::Find;
 
     use crate::odb::{db_small_packs, hex_to_id};
 
@@ -9,7 +9,7 @@ mod repo_with_small_packs {
         let mut buf = Vec::new();
         assert!(
             store
-                .try_find(hex_to_id("ecc68100297fff843a7eef8df0d0fb80c1c8bac5"), &mut buf)?
+                .try_find(&hex_to_id("ecc68100297fff843a7eef8df0d0fb80c1c8bac5"), &mut buf)?
                 .is_some(),
             "object is present and available"
         );
@@ -17,15 +17,16 @@ mod repo_with_small_packs {
     }
 
     #[test]
-    #[cfg(feature = "internal-testing-gix-features-parallel")]
+    #[cfg(feature = "gix-features-parallel")]
     fn multi_threaded_access_will_not_panic() -> crate::Result {
         for arg in ["no", "without-multi-index"] {
-            let base = gix_testtools::scripted_fixture_read_only_with_args("make_repo_multi_index.sh", Some(arg))?
-                .join(".git")
-                .join("objects");
+            let base =
+                gix_testtools::scripted_fixture_read_only_with_args_standalone("make_repo_multi_index.sh", Some(arg))?
+                    .join(".git")
+                    .join("objects");
             let store = gix_odb::at(base)?;
             let (tx, barrier) = crossbeam_channel::unbounded::<()>();
-            let handles = (0..num_cpus::get()).map(|tid| {
+            let handles = (0..std::thread::available_parallelism()?.get()).map(|tid| {
                 std::thread::spawn({
                     let store = store.clone();
                     let barrier = barrier.clone();
@@ -36,7 +37,7 @@ mod repo_with_small_packs {
                         for id in store.iter()? {
                             let id = id?;
                             assert!(
-                                store.try_find(id, &mut buf).is_ok(),
+                                store.try_find(&id, &mut buf).is_ok(),
                                 "Thread {} could not find {}",
                                 tid,
                                 id

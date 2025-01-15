@@ -21,7 +21,7 @@ mod write {
                 if let Some(value) = value {
                     validate(key, value.as_slice().into())
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-                    write_key(&mut out, key, value.as_ref())?;
+                    write_key(&mut out, key, value.as_ref()).ok();
                 }
             }
             for (key, value) in [
@@ -33,7 +33,7 @@ mod write {
                 if let Some(value) = value {
                     validate(key, value.as_str().into())
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-                    write_key(&mut out, key, value.as_bytes().as_bstr())?;
+                    write_key(&mut out, key, value.as_bytes().as_bstr()).ok();
                 }
             }
             Ok(())
@@ -50,8 +50,6 @@ mod write {
 
 ///
 pub mod decode {
-    use std::convert::TryFrom;
-
     use bstr::{BString, ByteSlice};
 
     use crate::protocol::{context, context::serde::validate, Context};
@@ -74,7 +72,10 @@ pub mod decode {
             let mut ctx = Context::default();
             for res in input.lines().take_while(|line| !line.is_empty()).map(|line| {
                 let mut it = line.splitn(2, |b| *b == b'=');
-                match (it.next().and_then(|k| k.to_str().ok()), it.next().map(|v| v.as_bstr())) {
+                match (
+                    it.next().and_then(|k| k.to_str().ok()),
+                    it.next().map(ByteSlice::as_bstr),
+                ) {
                     (Some(key), Some(value)) => validate(key, value)
                         .map(|_| (key, value.to_owned()))
                         .map_err(Into::into),
@@ -99,9 +100,7 @@ pub mod decode {
                     "url" => ctx.url = Some(value),
                     "path" => ctx.path = Some(value),
                     "quit" => {
-                        ctx.quit = gix_config_value::Boolean::try_from(value.as_ref())
-                            .ok()
-                            .map(|b| b.into());
+                        ctx.quit = gix_config_value::Boolean::try_from(value.as_ref()).ok().map(Into::into);
                     }
                     _ => {}
                 }

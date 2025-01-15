@@ -10,7 +10,7 @@ mod error {
 
     use crate::{decode, extension};
 
-    /// The error returned by [State::from_bytes()][crate::State::from_bytes()].
+    /// The error returned by [`State::from_bytes()`][crate::State::from_bytes()].
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {
@@ -35,7 +35,7 @@ use gix_features::parallel::InOrderIter;
 use crate::util::read_u32;
 
 /// Options to define how to decode an index state [from bytes][State::from_bytes()].
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Options {
     /// If Some(_), we are allowed to use more than one thread. If Some(N), use no more than N threads. If Some(0)|None, use as many threads
     /// as there are logical cores.
@@ -54,17 +54,18 @@ pub struct Options {
 
 impl State {
     /// Decode an index state from `data` and store `timestamp` in the resulting instance for pass-through, assuming `object_hash`
-    /// to be used through the file.
+    /// to be used through the file. Also return the stored hash over all bytes in `data` or `None` if none was written due to `index.skipHash`.
     pub fn from_bytes(
         data: &[u8],
         timestamp: FileTime,
         object_hash: gix_hash::Kind,
-        Options {
+        _options @ Options {
             thread_limit,
             min_extension_block_in_bytes_for_threading,
             expected_checksum,
         }: Options,
-    ) -> Result<(Self, gix_hash::ObjectId), Error> {
+    ) -> Result<(Self, Option<gix_hash::ObjectId>), Error> {
+        let _span = gix_features::trace::detail!("gix_index::State::from_bytes()", options = ?_options);
         let (version, num_entries, post_header_data) = header::decode(data, object_hash)?;
         let start_of_extensions = extension::end_of_index_entry::decode(data, object_hash);
 
@@ -86,25 +87,24 @@ impl State {
                         (extensions_data.len() > min_extension_block_in_bytes_for_threading).then({
                             num_threads -= 1;
                             || {
-                                scope
-                                    .builder()
+                                gix_features::parallel::build_thread()
                                     .name("gix-index.from_bytes.load-extensions".into())
-                                    .spawn(|_| extension::decode::all(extensions_data, object_hash))
+                                    .spawn_scoped(scope, || extension::decode::all(extensions_data, object_hash))
                                     .expect("valid name")
                             }
                         });
                     let entries_res = match index_offsets_table {
                         Some(entry_offsets) => {
                             let chunk_size = (entry_offsets.len() as f32 / num_threads as f32).ceil() as usize;
-                            let num_chunks = entry_offsets.chunks(chunk_size).count();
+                            let entry_offsets_chunked = entry_offsets.chunks(chunk_size);
+                            let num_chunks = entry_offsets_chunked.len();
                             let mut threads = Vec::with_capacity(num_chunks);
-                            for (id, chunks) in entry_offsets.chunks(chunk_size).enumerate() {
+                            for (id, chunks) in entry_offsets_chunked.enumerate() {
                                 let chunks = chunks.to_vec();
                                 threads.push(
-                                    scope
-                                        .builder()
+                                    gix_features::parallel::build_thread()
                                         .name(format!("gix-index.from_bytes.read-entries.{id}"))
-                                        .spawn(move |_| {
+                                        .spawn_scoped(scope, move || {
                                             let num_entries_for_chunks =
                                                 chunks.iter().map(|c| c.num_entries).sum::<u32>() as usize;
                                             let mut entries = Vec::with_capacity(num_entries_for_chunks);
@@ -160,10 +160,10 @@ impl State {
                             //       100GB/s on a single core.
                             while let (Ok(lhs), Some(res)) = (acc.as_mut(), results.next()) {
                                 match res {
-                                    Ok(rhs) => {
+                                    Ok(mut rhs) => {
                                         lhs.is_sparse |= rhs.is_sparse;
                                         let ofs = lhs.path_backing.len();
-                                        lhs.path_backing.extend(rhs.path_backing);
+                                        lhs.path_backing.append(&mut rhs.path_backing);
                                         lhs.entries.extend(rhs.entries.into_iter().map(|mut e| {
                                             e.path.start += ofs;
                                             e.path.end += ofs;
@@ -185,12 +185,12 @@ impl State {
                             version,
                         ),
                     };
-                    let ext_res = extension_loading
-                        .map(|thread| thread.join().unwrap())
-                        .unwrap_or_else(|| extension::decode::all(extensions_data, object_hash));
+                    let ext_res = extension_loading.map_or_else(
+                        || extension::decode::all(extensions_data, object_hash),
+                        |thread| thread.join().unwrap(),
+                    );
                     (entries_res, ext_res)
-                })
-                .unwrap(); // this unwrap is for panics - if these happened we are done anyway.
+                });
                 let (ext, data) = ext_res?;
                 (entries_res?.0, ext, data)
             }
@@ -214,11 +214,12 @@ impl State {
             });
         }
 
-        let checksum = gix_hash::ObjectId::from(data);
-        if let Some(expected_checksum) = expected_checksum {
-            if checksum != expected_checksum {
+        let checksum = gix_hash::ObjectId::from_bytes_or_panic(data);
+        let checksum = (!checksum.is_null()).then_some(checksum);
+        if let Some((expected_checksum, actual_checksum)) = expected_checksum.zip(checksum) {
+            if actual_checksum != expected_checksum {
                 return Err(Error::ChecksumMismatch {
-                    actual_checksum: checksum,
+                    actual_checksum,
                     expected_checksum,
                 });
             }
@@ -235,6 +236,8 @@ impl State {
             untracked,
             fs_monitor,
             is_sparse: is_sparse_from_ext, // a marker is needed in case there are no directories
+            end_of_index,
+            offset_table,
         } = ext;
         is_sparse |= is_sparse_from_ext;
 
@@ -247,6 +250,8 @@ impl State {
                 path_backing,
                 is_sparse,
 
+                end_of_index_at_decode_time: end_of_index,
+                offset_table_at_decode_time: offset_table,
                 tree,
                 link,
                 resolve_undo,
@@ -305,11 +310,11 @@ pub(crate) fn stat(data: &[u8]) -> Option<(entry::Stat, &[u8])> {
     let (size, data) = read_u32(data)?;
     Some((
         entry::Stat {
-            mtime: entry::Time {
+            mtime: entry::stat::Time {
                 secs: ctime_secs,
                 nsecs: ctime_nsecs,
             },
-            ctime: entry::Time {
+            ctime: entry::stat::Time {
                 secs: mtime_secs,
                 nsecs: mtime_nsecs,
             },

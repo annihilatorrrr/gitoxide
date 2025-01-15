@@ -4,10 +4,10 @@ use gix_object::bstr::{BStr, BString, ByteSlice, ByteVec};
 
 use crate::{Category, FullName, FullNameRef, PartialName, PartialNameRef};
 
-/// The error used in the [`PartialNameRef`][super::PartialNameRef]::try_from(…) implementations.
+/// The error used in the [`PartialNameRef`]`::try_from`(…) implementations.
 pub type Error = gix_validate::reference::name::Error;
 
-impl<'a> Category<'a> {
+impl Category<'_> {
     /// Return the prefix that would contain all references of our kind, or an empty string if the reference would
     /// be directly inside of the [`git_dir()`][crate::file::Store::git_dir()].
     pub fn prefix(&self) -> &BStr {
@@ -62,21 +62,21 @@ impl PartialNameRef {
 }
 
 impl PartialNameRef {
-    pub(crate) fn looks_like_full_name(&self) -> bool {
+    pub(crate) fn looks_like_full_name(&self, consider_pseudo_ref: bool) -> bool {
         let name = self.0.as_bstr();
         name.starts_with_str("refs/")
             || name.starts_with(Category::MainPseudoRef.prefix())
             || name.starts_with(Category::LinkedPseudoRef { name: "".into() }.prefix())
-            || is_pseudo_ref(name)
+            || (consider_pseudo_ref && is_pseudo_ref(name))
     }
     pub(crate) fn construct_full_name_ref<'buf>(
         &self,
-        add_refs_prefix: bool,
         inbetween: &str,
         buf: &'buf mut BString,
+        consider_pseudo_ref: bool,
     ) -> &'buf FullNameRef {
         buf.clear();
-        if add_refs_prefix && !self.looks_like_full_name() {
+        if !self.looks_like_full_name(consider_pseudo_ref) {
             buf.push_str("refs/");
         }
         if !inbetween.is_empty() {
@@ -103,10 +103,10 @@ impl PartialNameRef {
 
 impl PartialName {
     /// Append the `component` to ourselves and validate the newly created partial path.
-    pub fn join(self, component: impl AsRef<[u8]>) -> Result<Self, Error> {
+    pub fn join(self, component: &BStr) -> Result<Self, Error> {
         let mut b = self.0;
         b.push_byte(b'/');
-        b.extend(component.as_ref());
+        b.extend(component.as_bytes());
         gix_validate::reference::name_partial(b.as_ref())?;
         Ok(PartialName(b))
     }
@@ -265,9 +265,9 @@ impl convert::TryFrom<BString> for PartialName {
     }
 }
 
-/// Note that this method is disagreeing with gix_validate as it allows dashes '-' for some reason.
+/// Note that this method is disagreeing with `gix_validate` as it allows dashes '-' for some reason.
 /// Since partial names cannot be created with dashes inside we adjusted this as it's probably unintended or git creates pseudo-refs
 /// which wouldn't pass its safety checks.
-pub(crate) fn is_pseudo_ref<'a>(name: impl Into<&'a BStr>) -> bool {
-    name.into().bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+pub(crate) fn is_pseudo_ref(name: &BStr) -> bool {
+    name.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
 }

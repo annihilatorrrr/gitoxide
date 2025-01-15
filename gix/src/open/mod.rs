@@ -1,6 +1,17 @@
 use std::path::PathBuf;
 
-use crate::{bstr::BString, config, permission, Permissions};
+use crate::{bstr::BString, config};
+
+/// Permissions associated with various resources of a git repository
+#[derive(Debug, Clone)]
+pub struct Permissions {
+    /// Control which environment variables may be accessed.
+    pub env: permissions::Environment,
+    /// Permissions related where git configuration should be loaded from.
+    pub config: permissions::Config,
+    /// Permissions related to where `gitattributes` should be loaded from.
+    pub attributes: permissions::Attributes,
+}
 
 /// The options used in [`ThreadSafeRepository::open_opts()`][crate::ThreadSafeRepository::open_opts()].
 ///
@@ -16,7 +27,7 @@ pub struct Options {
     /// Define what is allowed while opening a repository.
     pub permissions: Permissions,
     pub(crate) git_dir_trust: Option<gix_sec::Trust>,
-    /// Warning: this one is copied to to config::Cache - don't change it after repo open or keep in sync.
+    /// Warning: this one is copied to config::Cache - don't change it after repo open or keep in sync.
     pub(crate) filter_config_section: Option<fn(&gix_config::file::Metadata) -> bool>,
     pub(crate) lossy_config: Option<bool>,
     pub(crate) lenient_config: bool,
@@ -44,11 +55,11 @@ pub enum Error {
     #[error("The git directory at '{}' is considered unsafe as it's not owned by the current user.", .path.display())]
     UnsafeGitDir { path: PathBuf },
     #[error(transparent)]
-    EnvironmentAccessDenied(#[from] permission::env_var::resource::Error),
+    EnvironmentAccessDenied(#[from] gix_sec::permission::Error<std::path::PathBuf>),
 }
 
 mod options;
-
+pub mod permissions;
 mod repository;
 
 #[cfg(test)]

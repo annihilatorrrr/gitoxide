@@ -1,3 +1,4 @@
+use crate::bstr::BStr;
 use crate::{ext::ReferenceExt, revision::Spec, Id, Reference};
 
 ///
@@ -8,7 +9,7 @@ mod impls {
 
     use crate::revision::Spec;
 
-    impl<'repo> Deref for Spec<'repo> {
+    impl Deref for Spec<'_> {
         type Target = gix_revision::Spec;
 
         fn deref(&self) -> &Self::Target {
@@ -16,19 +17,19 @@ mod impls {
         }
     }
 
-    impl<'repo> DerefMut for Spec<'repo> {
+    impl DerefMut for Spec<'_> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.inner
         }
     }
 
-    impl<'repo> PartialEq for Spec<'repo> {
+    impl PartialEq for Spec<'_> {
         fn eq(&self, other: &Self) -> bool {
             self.inner == other.inner
         }
     }
 
-    impl<'repo> Eq for Spec<'repo> {}
+    impl Eq for Spec<'_> {}
 }
 
 /// Initialization
@@ -37,6 +38,7 @@ impl<'repo> Spec<'repo> {
     pub fn from_id(id: Id<'repo>) -> Self {
         Spec {
             inner: gix_revision::Spec::Include(id.inner),
+            path: None,
             repo: id.repo,
             first_ref: None,
             second_ref: None,
@@ -60,6 +62,13 @@ impl<'repo> Spec<'repo> {
             self.first_ref.map(|r| r.attach(repo)),
             self.second_ref.map(|r| r.attach(repo)),
         )
+    }
+
+    /// Return the path encountered in specs like `@:<path>` or `:<path>`, along with the kind of object it represents.
+    ///
+    /// Note that there can only be one as paths always terminates further revspec parsing.
+    pub fn path_and_mode(&self) -> Option<(&BStr, gix_object::tree::EntryMode)> {
+        self.path.as_ref().map(|(p, mode)| (p.as_ref(), *mode))
     }
 
     /// Return the name of the first reference we encountered while resolving the rev-spec, or `None` if a short hash

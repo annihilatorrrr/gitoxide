@@ -1,8 +1,9 @@
 use std::str::FromStr;
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Default, Clone, Eq, PartialEq, Debug)]
 pub enum Protocol {
     V1,
+    #[default]
     V2,
 }
 
@@ -13,7 +14,7 @@ impl FromStr for Protocol {
         Ok(match s {
             "1" => Protocol::V1,
             "2" => Protocol::V2,
-            _ => return Err(format!("Unsupported protocol version '{}', choose '1' or '2'", s)),
+            _ => return Err(format!("Unsupported protocol version '{s}', choose '1' or '2'")),
         })
     }
 }
@@ -34,13 +35,21 @@ mod impls {
     }
 }
 
-impl Default for Protocol {
-    fn default() -> Self {
-        // Note that it's very important this remains V2, as V1 may block forever in stateful (i.e. non-http) connections when fetching
-        // as we chose not to complicate matters by counting which arguments where sent (just yet).
-        Protocol::V2
-    }
-}
-
 #[cfg(any(feature = "async-client", feature = "blocking-client"))]
-pub use gix::protocol::transport::connect;
+#[gix::protocol::maybe_async::maybe_async]
+pub async fn connect<Url, E>(
+    url: Url,
+    options: gix::protocol::transport::client::connect::Options,
+) -> Result<
+    gix::protocol::SendFlushOnDrop<Box<dyn gix::protocol::transport::client::Transport + Send>>,
+    gix::protocol::transport::client::connect::Error,
+>
+where
+    Url: TryInto<gix::url::Url, Error = E>,
+    gix::url::parse::Error: From<E>,
+{
+    Ok(gix::protocol::SendFlushOnDrop::new(
+        gix::protocol::transport::connect(url, options).await?,
+        false,
+    ))
+}

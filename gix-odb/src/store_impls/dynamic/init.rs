@@ -1,4 +1,4 @@
-use std::{iter::FromIterator, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use arc_swap::ArcSwap;
 
@@ -17,7 +17,7 @@ pub struct Options {
     /// If false, no multi-pack indices will be used. If true, they will be used if their hash matches `object_hash`.
     pub use_multi_pack_index: bool,
     /// The current directory of the process at the time of instantiation.
-    /// If unset, it will be retrieved using `std::env::current_dir()`.
+    /// If unset, it will be retrieved using `gix_fs::current_dir(false)`.
     pub current_dir: Option<std::path::PathBuf>,
 }
 
@@ -70,8 +70,8 @@ impl Store {
     /// `replacements` is an iterator over pairs of old and new object ids for replacement support.
     /// This means that when asking for object `X`, one will receive object `X-replaced` given an iterator like `Some((X, X-replaced))`.
     pub fn at_opts(
-        objects_dir: impl Into<PathBuf>,
-        replacements: impl IntoIterator<Item = (gix_hash::ObjectId, gix_hash::ObjectId)>,
+        objects_dir: PathBuf,
+        replacements: &mut dyn Iterator<Item = (gix_hash::ObjectId, gix_hash::ObjectId)>,
         Options {
             slots,
             object_hash,
@@ -79,8 +79,14 @@ impl Store {
             current_dir,
         }: Options,
     ) -> std::io::Result<Self> {
-        let objects_dir = objects_dir.into();
-        let current_dir = current_dir.map(Ok).unwrap_or_else(std::env::current_dir)?;
+        let _span = gix_features::trace::detail!("gix_odb::Store::at()");
+        let current_dir = current_dir.map_or_else(
+            || {
+                // It's only used for real-pathing alternate paths and there it just needs to be consistent (enough).
+                gix_fs::current_dir(false)
+            },
+            Ok,
+        )?;
         if !objects_dir.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other, // TODO: use NotADirectory when stabilized
@@ -90,7 +96,7 @@ impl Store {
         let slot_count = match slots {
             Slots::Given(n) => n as usize,
             Slots::AsNeededByDiskState { multiplier, minimum } => {
-                let mut db_paths = crate::alternate::resolve(&objects_dir, &current_dir)
+                let mut db_paths = crate::alternate::resolve(objects_dir.clone(), &current_dir)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
                 db_paths.insert(0, objects_dir.clone());
                 let num_slots = super::Store::collect_indices_and_mtime_sorted_by_size(db_paths, None, None)
@@ -106,7 +112,7 @@ impl Store {
                 "Cannot use more than 1^15 slots",
             ));
         }
-        let mut replacements: Vec<_> = replacements.into_iter().collect();
+        let mut replacements: Vec<_> = replacements.collect();
         replacements.sort_by(|a, b| a.0.cmp(&b.0));
 
         Ok(Store {

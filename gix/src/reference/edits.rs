@@ -19,13 +19,13 @@ pub mod set_target_id {
     }
     pub use error::Error;
 
-    impl<'repo> Reference<'repo> {
+    impl Reference<'_> {
         /// Set the id of this direct reference to `id` and use `reflog_message` for the reflog (if enabled in the repository).
         ///
         /// Note that the operation will fail on symbolic references, to change their type use the lower level reference database,
         /// or if the reference was deleted or changed in the mean time.
         /// Furthermore, refrain from using this method for more than a one-off change as it creates a transaction for each invocation.
-        /// If multiple reference should be changed, use [Repository::edit_references()][crate::Repository::edit_references()]
+        /// If multiple reference should be changed, use [`Repository::edit_references()`][crate::Repository::edit_references()]
         /// or the lower level reference database instead.
         #[allow(clippy::result_large_err)]
         pub fn set_target_id(
@@ -35,11 +35,11 @@ pub mod set_target_id {
         ) -> Result<(), Error> {
             match &self.inner.target {
                 Target::Symbolic(name) => return Err(Error::SymbolicReference { name: name.clone() }),
-                Target::Peeled(current_id) => {
+                Target::Object(current_id) => {
                     let changed = self.repo.reference(
                         self.name(),
                         id,
-                        PreviousValue::MustExistAndMatch(Target::Peeled(current_id.to_owned())),
+                        PreviousValue::MustExistAndMatch(Target::Object(current_id.to_owned())),
                         reflog_message,
                     )?;
                     *self = changed;
@@ -56,7 +56,7 @@ pub mod delete {
 
     use crate::Reference;
 
-    impl<'repo> Reference<'repo> {
+    impl Reference<'_> {
         /// Delete this reference or fail if it was changed since last observed.
         /// Note that this instance remains available in memory but probably shouldn't be used anymore.
         pub fn delete(&self) -> Result<(), crate::reference::edit::Error> {

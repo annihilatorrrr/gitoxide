@@ -1,6 +1,5 @@
-use std::convert::TryInto;
-
 use gix_object::bstr::{BStr, BString, ByteSlice};
+use winnow::prelude::*;
 
 use crate::{store_impl::packed, FullNameRef, PartialNameRef};
 
@@ -18,7 +17,7 @@ impl packed::Buffer {
         let name = name.try_into()?;
         let mut buf = BString::default();
         for inbetween in &["", "tags", "heads", "remotes"] {
-            let (name, was_absolute) = if name.looks_like_full_name() {
+            let (name, was_absolute) = if name.looks_like_full_name(false) {
                 let name = FullNameRef::new_unchecked(name.as_bstr());
                 let name = match transform_full_name_for_lookup(name) {
                     None => return Ok(None),
@@ -26,7 +25,7 @@ impl packed::Buffer {
                 };
                 (name, true)
             } else {
-                let full_name = name.construct_full_name_ref(true, inbetween, &mut buf);
+                let full_name = name.construct_full_name_ref(inbetween, &mut buf, false);
                 (full_name, false)
             };
             match self.try_find_full_name(name)? {
@@ -40,11 +39,14 @@ impl packed::Buffer {
 
     pub(crate) fn try_find_full_name(&self, name: &FullNameRef) -> Result<Option<packed::Reference<'_>>, Error> {
         match self.binary_search_by(name.as_bstr()) {
-            Ok(line_start) => Ok(Some(
-                packed::decode::reference::<()>(&self.as_ref()[line_start..])
-                    .map_err(|_| Error::Parse)?
-                    .1,
-            )),
+            Ok(line_start) => {
+                let mut input = &self.as_ref()[line_start..];
+                Ok(Some(
+                    packed::decode::reference::<()>
+                        .parse_next(&mut input)
+                        .map_err(|_| Error::Parse)?,
+                ))
+            }
             Err((parse_failure, _)) => {
                 if parse_failure {
                     Err(Error::Parse)
@@ -90,9 +92,10 @@ impl packed::Buffer {
         let mut encountered_parse_failure = false;
         a.binary_search_by_key(&full_name.as_ref(), |b: &u8| {
             let ofs = b as *const u8 as usize - a.as_ptr() as usize;
-            let line = &a[search_start_of_record(ofs)..];
-            packed::decode::reference::<()>(line)
-                .map(|(_rest, r)| r.name.as_bstr().as_bytes())
+            let mut line = &a[search_start_of_record(ofs)..];
+            packed::decode::reference::<()>
+                .parse_next(&mut line)
+                .map(|r| r.name.as_bstr().as_bytes())
                 .map_err(|err| {
                     encountered_parse_failure = true;
                     err

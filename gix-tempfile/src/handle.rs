@@ -1,9 +1,10 @@
 //!
+#![allow(clippy::empty_docs)]
 use std::{io, path::Path};
 
 use tempfile::{NamedTempFile, TempPath};
 
-use crate::{AutoRemove, ContainingDirectory, ForksafeTempfile, Handle, NEXT_MAP_INDEX, REGISTER};
+use crate::{AutoRemove, ContainingDirectory, ForksafeTempfile, Handle, NEXT_MAP_INDEX, REGISTRY};
 
 /// Marker to signal the Registration is an open file able to be written to.
 #[derive(Debug)]
@@ -23,12 +24,12 @@ pub(crate) enum Mode {
 /// Utilities
 impl Handle<()> {
     fn at_path(
-        path: impl AsRef<Path>,
+        path: &Path,
         directory: ContainingDirectory,
         cleanup: AutoRemove,
         mode: Mode,
+        permissions: Option<std::fs::Permissions>,
     ) -> io::Result<usize> {
-        let path = path.as_ref();
         let tempfile = {
             let mut builder = tempfile::Builder::new();
             let dot_ext_storage;
@@ -40,24 +41,27 @@ impl Handle<()> {
                 dot_ext_storage = format!(".{}", ext.to_string_lossy());
                 builder.suffix(&dot_ext_storage);
             }
+            if let Some(permissions) = permissions {
+                builder.permissions(permissions);
+            }
             let parent_dir = path.parent().expect("parent directory is present");
             let parent_dir = directory.resolve(parent_dir)?;
             ForksafeTempfile::new(builder.rand_bytes(0).tempfile_in(parent_dir)?, cleanup, mode)
         };
         let id = NEXT_MAP_INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        expect_none(REGISTER.insert(id, Some(tempfile)));
+        expect_none(REGISTRY.insert(id, Some(tempfile)));
         Ok(id)
     }
 
     fn new_writable_inner(
-        containing_directory: impl AsRef<Path>,
+        containing_directory: &Path,
         directory: ContainingDirectory,
         cleanup: AutoRemove,
         mode: Mode,
     ) -> io::Result<usize> {
-        let containing_directory = directory.resolve(containing_directory.as_ref())?;
+        let containing_directory = directory.resolve(containing_directory)?;
         let id = NEXT_MAP_INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        expect_none(REGISTER.insert(
+        expect_none(REGISTRY.insert(
             id,
             Some(ForksafeTempfile::new(
                 NamedTempFile::new_in(containing_directory)?,
@@ -75,9 +79,27 @@ impl Handle<Closed> {
     ///
     /// Depending on the `directory` configuration, intermediate directories will be created, and depending on `cleanup` empty
     /// intermediate directories will be removed.
+    ///
+    /// ### Warning of potential leaks
+    ///
+    /// Without [signal handlers](crate::signal) installed, tempfiles will remain once a termination
+    /// signal is encountered as destructors won't run. See [the top-level documentation](crate) for more.
     pub fn at(path: impl AsRef<Path>, directory: ContainingDirectory, cleanup: AutoRemove) -> io::Result<Self> {
         Ok(Handle {
-            id: Handle::<()>::at_path(path, directory, cleanup, Mode::Closed)?,
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Closed, None)?,
+            _marker: Default::default(),
+        })
+    }
+
+    /// Like [`at`](Self::at()), but with support for filesystem `permissions`.
+    pub fn at_with_permissions(
+        path: impl AsRef<Path>,
+        directory: ContainingDirectory,
+        cleanup: AutoRemove,
+        permissions: std::fs::Permissions,
+    ) -> io::Result<Self> {
+        Ok(Handle {
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Closed, Some(permissions))?,
             _marker: Default::default(),
         })
     }
@@ -86,9 +108,9 @@ impl Handle<Closed> {
     ///
     /// It's a theoretical possibility that the file isn't present anymore if signals interfere, hence the `Option`
     pub fn take(self) -> Option<TempPath> {
-        let res = REGISTER.remove(&self.id);
+        let res = REGISTRY.remove(&self.id);
         std::mem::forget(self);
-        res.and_then(|(_k, v)| v.map(|v| v.into_temppath()))
+        res.and_then(|(_k, v)| v.map(ForksafeTempfile::into_temppath))
     }
 }
 
@@ -98,9 +120,27 @@ impl Handle<Writable> {
     ///
     /// Depending on the `directory` configuration, intermediate directories will be created, and depending on `cleanup` empty
     /// intermediate directories will be removed.
+    ///
+    /// ### Warning of potential leaks
+    ///
+    /// Without [signal handlers](crate::signal) installed, tempfiles will remain once a termination
+    /// signal is encountered as destructors won't run. See [the top-level documentation](crate) for more.
     pub fn at(path: impl AsRef<Path>, directory: ContainingDirectory, cleanup: AutoRemove) -> io::Result<Self> {
         Ok(Handle {
-            id: Handle::<()>::at_path(path, directory, cleanup, Mode::Writable)?,
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Writable, None)?,
+            _marker: Default::default(),
+        })
+    }
+
+    /// Like [`at`](Self::at()), but with support for filesystem `permissions`.
+    pub fn at_with_permissions(
+        path: impl AsRef<Path>,
+        directory: ContainingDirectory,
+        cleanup: AutoRemove,
+        permissions: std::fs::Permissions,
+    ) -> io::Result<Self> {
+        Ok(Handle {
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Writable, Some(permissions))?,
             _marker: Default::default(),
         })
     }
@@ -108,13 +148,18 @@ impl Handle<Writable> {
     /// Create a registered tempfile within `containing_directory` with a name that won't clash, and clean it up as specified with `cleanup`.
     /// Control how to deal with intermediate directories with `directory`.
     /// The temporary file is opened and can be written to using the [`with_mut()`][Handle::with_mut()] method.
+    ///
+    /// ### Warning of potential leaks
+    ///
+    /// Without [signal handlers](crate::signal) installed, tempfiles will remain once a termination
+    /// signal is encountered as destructors won't run. See [the top-level documentation](crate) for more.
     pub fn new(
         containing_directory: impl AsRef<Path>,
         directory: ContainingDirectory,
         cleanup: AutoRemove,
     ) -> io::Result<Self> {
         Ok(Handle {
-            id: Handle::<()>::new_writable_inner(containing_directory, directory, cleanup, Mode::Writable)?,
+            id: Handle::<()>::new_writable_inner(containing_directory.as_ref(), directory, cleanup, Mode::Writable)?,
             _marker: Default::default(),
         })
     }
@@ -123,7 +168,7 @@ impl Handle<Writable> {
     ///
     /// It's a theoretical possibility that the file isn't present anymore if signals interfere, hence the `Option`
     pub fn take(self) -> Option<NamedTempFile> {
-        let res = REGISTER.remove(&self.id);
+        let res = REGISTRY.remove(&self.id);
         std::mem::forget(self);
         res.and_then(|(_k, v)| v.map(|v| v.into_tempfile().expect("correct runtime typing")))
     }
@@ -134,17 +179,17 @@ impl Handle<Writable> {
     /// it right after to perform more updates of this kind in other tempfiles. When all succeed, they can be renamed one after
     /// another.
     pub fn close(self) -> std::io::Result<Handle<Closed>> {
-        match REGISTER.remove(&self.id) {
+        match REGISTRY.remove(&self.id) {
             Some((id, Some(t))) => {
                 std::mem::forget(self);
-                expect_none(REGISTER.insert(id, Some(t.close())));
+                expect_none(REGISTRY.insert(id, Some(t.close())));
                 Ok(Handle::<Closed> {
                     id,
                     _marker: Default::default(),
                 })
             }
             None | Some((_, None)) => Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
+                std::io::ErrorKind::NotFound,
                 format!("The tempfile with id {} wasn't available anymore", self.id),
             )),
         }
@@ -162,14 +207,14 @@ impl Handle<Writable> {
     /// The caller must assure that the signal handler for cleanup will be followed by an abort call so that
     /// this code won't run again on a removed instance. An error will occur otherwise.
     pub fn with_mut<T>(&mut self, once: impl FnOnce(&mut NamedTempFile) -> T) -> std::io::Result<T> {
-        match REGISTER.remove(&self.id) {
+        match REGISTRY.remove(&self.id) {
             Some((id, Some(mut t))) => {
                 let res = once(t.as_mut_tempfile().expect("correct runtime typing"));
-                expect_none(REGISTER.insert(id, Some(t)));
+                expect_none(REGISTRY.insert(id, Some(t)));
                 Ok(res)
             }
             None | Some((_, None)) => Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
+                std::io::ErrorKind::NotFound,
                 format!("The tempfile with id {} wasn't available anymore", self.id),
             )),
         }
@@ -187,7 +232,7 @@ mod io_impls {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.with_mut(|f| f.flush())?
+            self.with_mut(io::Write::flush)?
         }
     }
 
@@ -210,7 +255,7 @@ pub mod persist {
 
     use crate::{
         handle::{expect_none, Closed, Writable},
-        Handle, REGISTER,
+        Handle, REGISTRY,
     };
 
     mod error {
@@ -247,7 +292,7 @@ pub mod persist {
         /// Note that it might not exist anymore if an interrupt handler managed to steal it and allowed the program to return to
         /// its normal flow.
         pub fn persist(self, path: impl AsRef<Path>) -> Result<Option<std::fs::File>, Error<Writable>> {
-            let res = REGISTER.remove(&self.id);
+            let res = REGISTRY.remove(&self.id);
 
             match res.and_then(|(_k, v)| v.map(|v| v.persist(path))) {
                 Some(Ok(Some(file))) => {
@@ -259,7 +304,7 @@ pub mod persist {
                     Ok(None)
                 }
                 Some(Err((err, tempfile))) => {
-                    expect_none(REGISTER.insert(self.id, Some(tempfile)));
+                    expect_none(REGISTRY.insert(self.id, Some(tempfile)));
                     Err(Error::<Writable> {
                         error: err,
                         handle: self,
@@ -274,7 +319,7 @@ pub mod persist {
         /// Persist this tempfile to replace the file at the given `path` if necessary, in a way that recovers the original instance
         /// on error.
         pub fn persist(self, path: impl AsRef<Path>) -> Result<(), Error<Closed>> {
-            let res = REGISTER.remove(&self.id);
+            let res = REGISTRY.remove(&self.id);
 
             match res.and_then(|(_k, v)| v.map(|v| v.persist(path))) {
                 None | Some(Ok(None)) => {
@@ -282,7 +327,7 @@ pub mod persist {
                     Ok(())
                 }
                 Some(Err((err, tempfile))) => {
-                    expect_none(REGISTER.insert(self.id, Some(tempfile)));
+                    expect_none(REGISTRY.insert(self.id, Some(tempfile)));
                     Err(Error::<Closed> {
                         error: err,
                         handle: self,
@@ -312,7 +357,7 @@ fn expect_none<T>(v: Option<T>) {
 
 impl<T: std::fmt::Debug> Drop for Handle<T> {
     fn drop(&mut self) {
-        if let Some((_id, Some(tempfile))) = REGISTER.remove(&self.id) {
+        if let Some((_id, Some(tempfile))) = REGISTRY.remove(&self.id) {
             tempfile.drop_impl();
         }
     }

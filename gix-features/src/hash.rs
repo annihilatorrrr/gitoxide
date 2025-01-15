@@ -5,7 +5,7 @@
 //! Otherwise, a minimal yet performant implementation is used instead for a decent trade-off between compile times and run-time performance.
 #[cfg(all(feature = "rustsha1", not(feature = "fast-sha1")))]
 mod _impl {
-    use super::Sha1Digest;
+    use super::Digest;
 
     /// A implementation of the Sha1 hash, which can be used once.
     #[derive(Default, Clone)]
@@ -14,24 +14,22 @@ mod _impl {
     impl Sha1 {
         /// Digest the given `bytes`.
         pub fn update(&mut self, bytes: &[u8]) {
-            self.0.update(bytes)
+            self.0.update(bytes);
         }
         /// Finalize the hash and produce a digest.
-        pub fn digest(self) -> Sha1Digest {
+        pub fn digest(self) -> Digest {
             self.0.digest().bytes()
         }
     }
 }
 
-/// A 20 bytes digest produced by a [`Sha1`] hash implementation.
+/// A hash-digest produced by a [`Hasher`] hash implementation.
 #[cfg(any(feature = "fast-sha1", feature = "rustsha1"))]
-pub type Sha1Digest = [u8; 20];
+pub type Digest = [u8; 20];
 
 #[cfg(feature = "fast-sha1")]
 mod _impl {
     use sha1::Digest;
-
-    use super::Sha1Digest;
 
     /// A implementation of the Sha1 hash, which can be used once.
     #[derive(Default, Clone)]
@@ -40,17 +38,17 @@ mod _impl {
     impl Sha1 {
         /// Digest the given `bytes`.
         pub fn update(&mut self, bytes: &[u8]) {
-            self.0.update(bytes)
+            self.0.update(bytes);
         }
         /// Finalize the hash and produce a digest.
-        pub fn digest(self) -> Sha1Digest {
+        pub fn digest(self) -> super::Digest {
             self.0.finalize().into()
         }
     }
 }
 
 #[cfg(any(feature = "rustsha1", feature = "fast-sha1"))]
-pub use _impl::Sha1;
+pub use _impl::Sha1 as Hasher;
 
 /// Compute a CRC32 hash from the given `bytes`, returning the CRC32 hash.
 ///
@@ -76,9 +74,9 @@ pub fn crc32(bytes: &[u8]) -> u32 {
 
 /// Produce a hasher suitable for the given kind of hash.
 #[cfg(any(feature = "rustsha1", feature = "fast-sha1"))]
-pub fn hasher(kind: gix_hash::Kind) -> Sha1 {
+pub fn hasher(kind: gix_hash::Kind) -> Hasher {
     match kind {
-        gix_hash::Kind::Sha1 => Sha1::default(),
+        gix_hash::Kind::Sha1 => Hasher::default(),
     }
 }
 
@@ -95,14 +93,14 @@ pub fn hasher(kind: gix_hash::Kind) -> Sha1 {
 /// * [Interrupts][crate::interrupt] are supported.
 #[cfg(all(feature = "progress", any(feature = "rustsha1", feature = "fast-sha1")))]
 pub fn bytes_of_file(
-    path: impl AsRef<std::path::Path>,
-    num_bytes_from_start: usize,
+    path: &std::path::Path,
+    num_bytes_from_start: u64,
     kind: gix_hash::Kind,
-    progress: &mut impl crate::progress::Progress,
+    progress: &mut dyn crate::progress::Progress,
     should_interrupt: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<gix_hash::ObjectId> {
     bytes(
-        std::fs::File::open(path)?,
+        &mut std::fs::File::open(path)?,
         num_bytes_from_start,
         kind,
         progress,
@@ -110,28 +108,42 @@ pub fn bytes_of_file(
     )
 }
 
-/// Similar to [`bytes_of_file`], but operates on an already open file.
+/// Similar to [`bytes_of_file`], but operates on a stream of bytes.
 #[cfg(all(feature = "progress", any(feature = "rustsha1", feature = "fast-sha1")))]
 pub fn bytes(
-    mut read: impl std::io::Read,
-    num_bytes_from_start: usize,
+    read: &mut dyn std::io::Read,
+    num_bytes_from_start: u64,
     kind: gix_hash::Kind,
-    progress: &mut impl crate::progress::Progress,
+    progress: &mut dyn crate::progress::Progress,
     should_interrupt: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<gix_hash::ObjectId> {
-    let mut hasher = hasher(kind);
+    bytes_with_hasher(read, num_bytes_from_start, hasher(kind), progress, should_interrupt)
+}
+
+/// Similar to [`bytes()`], but takes a `hasher` instead of a hash kind.
+#[cfg(all(feature = "progress", any(feature = "rustsha1", feature = "fast-sha1")))]
+pub fn bytes_with_hasher(
+    read: &mut dyn std::io::Read,
+    num_bytes_from_start: u64,
+    mut hasher: Hasher,
+    progress: &mut dyn crate::progress::Progress,
+    should_interrupt: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<gix_hash::ObjectId> {
     let start = std::time::Instant::now();
     // init progress before the possibility for failure, as convenience in case people want to recover
-    progress.init(Some(num_bytes_from_start), crate::progress::bytes());
+    progress.init(
+        Some(num_bytes_from_start as prodash::progress::Step),
+        crate::progress::bytes(),
+    );
 
     const BUF_SIZE: usize = u16::MAX as usize;
     let mut buf = [0u8; BUF_SIZE];
     let mut bytes_left = num_bytes_from_start;
 
     while bytes_left > 0 {
-        let out = &mut buf[..BUF_SIZE.min(bytes_left)];
+        let out = &mut buf[..BUF_SIZE.min(bytes_left as usize)];
         read.read_exact(out)?;
-        bytes_left -= out.len();
+        bytes_left -= out.len() as u64;
         progress.inc_by(out.len());
         hasher.update(out);
         if should_interrupt.load(std::sync::atomic::Ordering::SeqCst) {
@@ -146,12 +158,12 @@ pub fn bytes(
 
 #[cfg(any(feature = "rustsha1", feature = "fast-sha1"))]
 mod write {
-    use crate::hash::Sha1;
+    use crate::hash::Hasher;
 
     /// A utility to automatically generate a hash while writing into an inner writer.
     pub struct Write<T> {
         /// The hash implementation.
-        pub hash: Sha1,
+        pub hash: Hasher,
         /// The inner writer.
         pub inner: T,
     }
@@ -180,7 +192,7 @@ mod write {
             match object_hash {
                 gix_hash::Kind::Sha1 => Write {
                     inner,
-                    hash: Sha1::default(),
+                    hash: Hasher::default(),
                 },
             }
         }

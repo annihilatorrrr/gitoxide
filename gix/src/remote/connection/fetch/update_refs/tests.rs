@@ -8,8 +8,6 @@ fn hex_to_id(hex: &str) -> gix_hash::ObjectId {
 }
 
 mod update {
-    use std::convert::TryInto;
-
     use gix_testtools::Result;
 
     use super::hex_to_id;
@@ -27,12 +25,19 @@ mod update {
     }
 
     fn repo(name: &str) -> gix::Repository {
-        let dir =
-            gix_testtools::scripted_fixture_read_only_with_args("make_fetch_repos.sh", [base_repo_path()]).unwrap();
+        let dir = gix_testtools::scripted_fixture_read_only_with_args_single_archive(
+            "make_fetch_repos.sh",
+            [base_repo_path()],
+        )
+        .unwrap();
+        gix::open_opts(dir.join(name), restricted()).unwrap()
+    }
+    fn named_repo(name: &str) -> gix::Repository {
+        let dir = gix_testtools::scripted_fixture_read_only("make_remote_repos.sh").unwrap();
         gix::open_opts(dir.join(name), restricted()).unwrap()
     }
     fn repo_rw(name: &str) -> (gix::Repository, gix_testtools::tempfile::TempDir) {
-        let dir = gix_testtools::scripted_fixture_writable_with_args(
+        let dir = gix_testtools::scripted_fixture_writable_with_args_single_archive(
             "make_fetch_repos.sh",
             [base_repo_path()],
             gix_testtools::Creation::ExecuteScript,
@@ -41,13 +46,22 @@ mod update {
         let repo = gix::open_opts(dir.path().join(name), restricted()).unwrap();
         (repo, dir)
     }
-    use gix_ref::{transaction::Change, TargetRef};
+    use gix_ref::{
+        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
+        Target, TargetRef,
+    };
 
     use crate::{
         bstr::BString,
         remote::{
             fetch,
-            fetch::{refs::tests::restricted, Mapping, RefLogMessage, Source, SpecIndex},
+            fetch::{
+                refmap::Mapping,
+                refmap::Source,
+                refmap::SpecIndex,
+                refs::{tests::restricted, update::TypeChange},
+                RefLogMessage,
+            },
         },
     };
 
@@ -112,7 +126,7 @@ mod update {
             (
                 "+refs/remotes/origin/g:refs/heads/main",
                 fetch::refs::update::Mode::RejectedCurrentlyCheckedOut {
-                    worktree_dir: repo.work_dir().expect("present").to_owned(),
+                    worktree_dirs: vec![repo.work_dir().expect("present").to_owned()],
                 },
                 None,
                 "checked out branches cannot be written, as it requires a merge of sorts which isn't done here",
@@ -140,7 +154,7 @@ mod update {
                 &specs,
                 &[],
                 fetch::Tags::None,
-                reflog_message.map(|_| fetch::DryRun::Yes).unwrap_or(fetch::DryRun::No),
+                reflog_message.map_or(fetch::DryRun::No, |_| fetch::DryRun::Yes),
                 fetch::WritePackedRefs::Never,
             )
             .unwrap();
@@ -148,12 +162,13 @@ mod update {
             assert_eq!(
                 out.updates,
                 vec![fetch::refs::Update {
+                    type_change: None,
                     mode: expected_mode.clone(),
                     edit_index: reflog_message.map(|_| 0),
                 }],
                 "{spec:?}: {detail}"
             );
-            assert_eq!(out.edits.len(), reflog_message.map(|_| 1).unwrap_or(0));
+            assert_eq!(out.edits.len(), reflog_message.map_or(0, |_| 1));
             if let Some(reflog_message) = reflog_message {
                 let edit = &out.edits[0];
                 match &edit.change {
@@ -170,7 +185,7 @@ mod update {
                             new.id(),
                             remote_ref.target().id(),
                             "remote ref provides the id to set in the local reference"
-                        )
+                        );
                     }
                     _ => unreachable!("only updates"),
                 }
@@ -180,7 +195,7 @@ mod update {
 
     #[test]
     fn checked_out_branches_in_worktrees_are_rejected_with_additional_information() -> Result {
-        let root = gix_path::realpath(gix_testtools::scripted_fixture_read_only_with_args(
+        let root = gix_path::realpath(gix_testtools::scripted_fixture_read_only_with_args_single_archive(
             "make_fetch_repos.sh",
             [base_repo_path()],
         )?)?;
@@ -211,8 +226,9 @@ mod update {
                 out.updates,
                 vec![fetch::refs::Update {
                     mode: fetch::refs::update::Mode::RejectedCurrentlyCheckedOut {
-                        worktree_dir: root.join(path_from_root),
+                        worktree_dirs: vec![root.join(path_from_root)],
                     },
+                    type_change: None,
                     edit_index: None,
                 }],
                 "{spec}: checked-out checks are done before checking if a change would actually be required (here it isn't)"
@@ -223,10 +239,350 @@ mod update {
     }
 
     #[test]
-    fn local_symbolic_refs_are_never_written() {
+    fn unborn_remote_branches_can_be_created_locally_if_they_are_new() -> Result {
+        let repo = named_repo("unborn");
+        let (mappings, specs) = mapping_from_spec("HEAD:refs/remotes/origin/HEAD", &repo);
+        assert_eq!(mappings.len(), 1);
+        let out = fetch::refs::update(
+            &repo,
+            prefixed("action"),
+            &mappings,
+            &specs,
+            &[],
+            fetch::Tags::None,
+            fetch::DryRun::Yes,
+            fetch::WritePackedRefs::Never,
+        )?;
+        assert_eq!(
+            out.updates,
+            vec![fetch::refs::Update {
+                mode: fetch::refs::update::Mode::New,
+                type_change: None,
+                edit_index: Some(0)
+            }]
+        );
+        assert_eq!(out.edits.len(), 1, "we are OK with creating unborn refs");
+        Ok(())
+    }
+
+    #[test]
+    fn unborn_remote_branches_can_update_local_unborn_branches() -> Result {
+        let repo = named_repo("unborn");
+        let (mappings, specs) = mapping_from_spec("HEAD:refs/heads/existing-unborn-symbolic", &repo);
+        assert_eq!(mappings.len(), 1);
+        let out = fetch::refs::update(
+            &repo,
+            prefixed("action"),
+            &mappings,
+            &specs,
+            &[],
+            fetch::Tags::None,
+            fetch::DryRun::Yes,
+            fetch::WritePackedRefs::Never,
+        )?;
+        assert_eq!(
+            out.updates,
+            vec![fetch::refs::Update {
+                mode: fetch::refs::update::Mode::NoChangeNeeded,
+                type_change: None,
+                edit_index: Some(0)
+            }]
+        );
+        assert_eq!(out.edits.len(), 1, "we are OK with updating unborn refs");
+        assert_eq!(
+            out.edits[0],
+            RefEdit {
+                change: Change::Update {
+                    log: LogChange {
+                        mode: RefLog::AndReference,
+                        force_create_reflog: false,
+                        message: "action: change unborn ref".into(),
+                    },
+                    expected: PreviousValue::MustExistAndMatch(Target::Symbolic(
+                        "refs/heads/main".try_into().expect("valid"),
+                    )),
+                    new: Target::Symbolic("refs/heads/main".try_into().expect("valid")),
+                },
+                name: "refs/heads/existing-unborn-symbolic".try_into().expect("valid"),
+                deref: false,
+            }
+        );
+
+        let (mappings, specs) = mapping_from_spec("HEAD:refs/heads/existing-unborn-symbolic-other", &repo);
+        assert_eq!(mappings.len(), 1);
+        let out = fetch::refs::update(
+            &repo,
+            prefixed("action"),
+            &mappings,
+            &specs,
+            &[],
+            fetch::Tags::None,
+            fetch::DryRun::Yes,
+            fetch::WritePackedRefs::Never,
+        )?;
+        assert_eq!(
+            out.updates,
+            vec![fetch::refs::Update {
+                mode: fetch::refs::update::Mode::Forced,
+                type_change: None,
+                edit_index: Some(0)
+            }]
+        );
+        assert_eq!(
+            out.edits.len(),
+            1,
+            "we are OK with creating unborn refs even without actually forcing it"
+        );
+        assert_eq!(
+            out.edits[0],
+            RefEdit {
+                change: Change::Update {
+                    log: LogChange {
+                        mode: RefLog::AndReference,
+                        force_create_reflog: false,
+                        message: "action: change unborn ref".into(),
+                    },
+                    expected: PreviousValue::MustExistAndMatch(Target::Symbolic(
+                        "refs/heads/other".try_into().expect("valid"),
+                    )),
+                    new: Target::Symbolic("refs/heads/main".try_into().expect("valid")),
+                },
+                name: "refs/heads/existing-unborn-symbolic-other".try_into().expect("valid"),
+                deref: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_symbolic_refs_with_locally_unavailable_target_result_in_valid_peeled_branches() -> Result {
+        let remote_repo = named_repo("one-commit-with-symref");
+        let local_repo = named_repo("unborn");
+        let (mappings, specs) = mapping_from_spec("refs/heads/symbolic:refs/heads/new", &remote_repo);
+        assert_eq!(mappings.len(), 1);
+
+        let out = fetch::refs::update(
+            &local_repo,
+            prefixed("action"),
+            &mappings,
+            &specs,
+            &[],
+            fetch::Tags::None,
+            fetch::DryRun::Yes,
+            fetch::WritePackedRefs::Never,
+        )?;
+        assert_eq!(
+            out.updates,
+            vec![fetch::refs::Update {
+                mode: fetch::refs::update::Mode::New,
+                type_change: None,
+                edit_index: Some(0)
+            }]
+        );
+        assert_eq!(out.edits.len(), 1);
+        let target = Target::Object(hex_to_id("66f16e4e8baf5c77bb6d0484495bebea80e916ce"));
+        assert_eq!(
+            out.edits[0],
+            RefEdit {
+                change: Change::Update {
+                    log: LogChange {
+                        mode: RefLog::AndReference,
+                        force_create_reflog: false,
+                        message: "action: storing head".into(),
+                    },
+                    expected: PreviousValue::ExistingMustMatch(target.clone()),
+                    new: target,
+                },
+                name: "refs/heads/new".try_into().expect("valid"),
+                deref: false,
+            },
+            "we create local-refs whose targets aren't present yet, even though the remote knows them.\
+             This leaves the caller with assuring all refs are mentioned in mappings."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_symbolic_refs_with_locally_unavailable_target_dont_overwrite_valid_local_branches() -> Result {
+        let remote_repo = named_repo("one-commit-with-symref");
+        let local_repo = named_repo("one-commit-with-symref-missing-branch");
+        let (mappings, specs) = mapping_from_spec("refs/heads/unborn:refs/heads/valid-locally", &remote_repo);
+        assert_eq!(mappings.len(), 1);
+
+        let out = fetch::refs::update(
+            &local_repo,
+            prefixed("action"),
+            &mappings,
+            &specs,
+            &[],
+            fetch::Tags::None,
+            fetch::DryRun::Yes,
+            fetch::WritePackedRefs::Never,
+        )?;
+        assert_eq!(
+            out.updates,
+            vec![fetch::refs::Update {
+                mode: fetch::refs::update::Mode::RejectedToReplaceWithUnborn,
+                type_change: None,
+                edit_index: None
+            }]
+        );
+        assert_eq!(out.edits.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unborn_remote_refs_dont_overwrite_valid_local_refs() -> Result {
+        let remote_repo = named_repo("unborn");
+        let local_repo = named_repo("one-commit-with-symref");
+        let (mappings, specs) =
+            mapping_from_spec("refs/heads/existing-unborn-symbolic:refs/heads/branch", &remote_repo);
+        assert_eq!(mappings.len(), 1);
+
+        let out = fetch::refs::update(
+            &local_repo,
+            prefixed("action"),
+            &mappings,
+            &specs,
+            &[],
+            fetch::Tags::None,
+            fetch::DryRun::Yes,
+            fetch::WritePackedRefs::Never,
+        )?;
+        assert_eq!(
+            out.updates,
+            vec![fetch::refs::Update {
+                mode: fetch::refs::update::Mode::RejectedToReplaceWithUnborn,
+                type_change: None,
+                edit_index: None
+            }],
+            "we don't overwrite locally present refs with unborn ones for safety"
+        );
+        assert_eq!(out.edits.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn local_symbolic_refs_can_be_overwritten() {
         let repo = repo("two-origins");
-        for source in ["refs/heads/main", "refs/heads/symbolic", "HEAD"] {
-            let (mappings, specs) = mapping_from_spec(&format!("{source}:refs/heads/symbolic"), &repo);
+        for (source, destination, expected_update, expected_edit) in [
+            (
+                // attempt to overwrite HEAD isn't possible as the matching engine will normalize the path. That way, `HEAD`
+                // can never be set. This is by design (of git) and we follow it.
+                "refs/heads/symbolic",
+                "HEAD",
+                fetch::refs::Update {
+                    mode: fetch::refs::update::Mode::New,
+                    type_change: None,
+                    edit_index: Some(0),
+                },
+                Some(RefEdit {
+                    change: Change::Update {
+                        log: LogChange {
+                            mode: RefLog::AndReference,
+                            force_create_reflog: false,
+                            message: "action: storing head".into(),
+                        },
+                        expected: PreviousValue::ExistingMustMatch(Target::Symbolic(
+                            "refs/heads/main".try_into().expect("valid"),
+                        )),
+                        new: Target::Symbolic("refs/heads/main".try_into().expect("valid")),
+                    },
+                    name: "refs/heads/HEAD".try_into().expect("valid"),
+                    deref: false,
+                }),
+            ),
+            (
+                // attempt to overwrite checked out branch fails
+                "refs/remotes/origin/b", // strange, but the remote-refs are simulated and based on local refs
+                "refs/heads/main",
+                fetch::refs::Update {
+                    mode: fetch::refs::update::Mode::RejectedCurrentlyCheckedOut {
+                        worktree_dirs: vec![repo.work_dir().expect("present").to_owned()],
+                    },
+                    type_change: None,
+                    edit_index: None,
+                },
+                None,
+            ),
+            (
+                // symbolic becomes direct
+                "refs/heads/main",
+                "refs/heads/symbolic",
+                fetch::refs::Update {
+                    mode: fetch::refs::update::Mode::NoChangeNeeded,
+                    type_change: Some(TypeChange::SymbolicToDirect),
+                    edit_index: Some(0),
+                },
+                Some(RefEdit {
+                    change: Change::Update {
+                        log: LogChange {
+                            mode: RefLog::AndReference,
+                            force_create_reflog: false,
+                            message: "action: no update will be performed".into(),
+                        },
+                        expected: PreviousValue::MustExistAndMatch(Target::Symbolic(
+                            "refs/heads/main".try_into().expect("valid"),
+                        )),
+                        new: Target::Object(hex_to_id("f99771fe6a1b535783af3163eba95a927aae21d5")),
+                    },
+                    name: "refs/heads/symbolic".try_into().expect("valid"),
+                    deref: false,
+                }),
+            ),
+            (
+                // direct becomes symbolic
+                "refs/heads/symbolic",
+                "refs/remotes/origin/a",
+                fetch::refs::Update {
+                    mode: fetch::refs::update::Mode::NoChangeNeeded,
+                    type_change: Some(TypeChange::DirectToSymbolic),
+                    edit_index: Some(0),
+                },
+                Some(RefEdit {
+                    change: Change::Update {
+                        log: LogChange {
+                            mode: RefLog::AndReference,
+                            force_create_reflog: false,
+                            message: "action: no update will be performed".into(),
+                        },
+                        expected: PreviousValue::MustExistAndMatch(Target::Object(hex_to_id(
+                            "f99771fe6a1b535783af3163eba95a927aae21d5",
+                        ))),
+                        new: Target::Symbolic("refs/heads/main".try_into().expect("valid")),
+                    },
+                    name: "refs/remotes/origin/a".try_into().expect("valid"),
+                    deref: false,
+                }),
+            ),
+            (
+                // symbolic to symbolic (same)
+                "refs/heads/symbolic",
+                "refs/heads/symbolic",
+                fetch::refs::Update {
+                    mode: fetch::refs::update::Mode::NoChangeNeeded,
+                    type_change: None,
+                    edit_index: Some(0),
+                },
+                Some(RefEdit {
+                    change: Change::Update {
+                        log: LogChange {
+                            mode: RefLog::AndReference,
+                            force_create_reflog: false,
+                            message: "action: no update will be performed".into(),
+                        },
+                        expected: PreviousValue::MustExistAndMatch(Target::Symbolic(
+                            "refs/heads/main".try_into().expect("valid"),
+                        )),
+                        new: Target::Symbolic("refs/heads/main".try_into().expect("valid")),
+                    },
+                    name: "refs/heads/symbolic".try_into().expect("valid"),
+                    deref: false,
+                }),
+            ),
+        ] {
+            let (mappings, specs) = mapping_from_spec(&format!("{source}:{destination}"), &repo);
+            assert_eq!(mappings.len(), 1);
             let out = fetch::refs::update(
                 &repo,
                 prefixed("action"),
@@ -239,15 +595,11 @@ mod update {
             )
             .unwrap();
 
-            assert_eq!(out.edits.len(), 0);
-            assert_eq!(
-                out.updates,
-                vec![fetch::refs::Update {
-                    mode: fetch::refs::update::Mode::RejectedSymbolic,
-                    edit_index: None
-                }],
-                "we don't overwrite these as the checked-out check needs to consider much more than it currently does, we are playing it safe"
-            );
+            assert_eq!(out.edits.len(), usize::from(expected_edit.is_some()));
+            assert_eq!(out.updates, vec![expected_update]);
+            if let Some(expected) = expected_edit {
+                assert_eq!(out.edits, vec![expected]);
+            }
         }
     }
 
@@ -257,7 +609,7 @@ mod update {
         let (mut mappings, specs) = mapping_from_spec("refs/heads/symbolic:refs/remotes/origin/new", &repo);
         mappings.push(Mapping {
             remote: Source::Ref(gix_protocol::handshake::Ref::Direct {
-                full_ref_name: "refs/heads/main".try_into().unwrap(),
+                full_ref_name: "refs/heads/main".into(),
                 object: hex_to_id("f99771fe6a1b535783af3163eba95a927aae21d5"),
             }),
             local: Some("refs/heads/symbolic".into()),
@@ -275,17 +627,19 @@ mod update {
         )
         .unwrap();
 
-        assert_eq!(out.edits.len(), 1);
+        assert_eq!(out.edits.len(), 2, "symbolic refs are handled just like any other ref");
         assert_eq!(
             out.updates,
             vec![
                 fetch::refs::Update {
                     mode: fetch::refs::update::Mode::New,
+                    type_change: None,
                     edit_index: Some(0)
                 },
                 fetch::refs::Update {
-                    mode: fetch::refs::update::Mode::RejectedSymbolic,
-                    edit_index: None
+                    mode: fetch::refs::update::Mode::NoChangeNeeded,
+                    type_change: Some(TypeChange::SymbolicToDirect),
+                    edit_index: Some(1)
                 }
             ],
         );
@@ -303,7 +657,7 @@ mod update {
     }
 
     #[test]
-    fn local_direct_refs_are_never_written_with_symbolic_ones_but_see_only_the_destination() {
+    fn local_direct_refs_are_written_with_symbolic_ones() {
         let repo = repo("two-origins");
         let (mappings, specs) = mapping_from_spec("refs/heads/symbolic:refs/heads/not-currently-checked-out", &repo);
         let out = fetch::refs::update(
@@ -323,6 +677,7 @@ mod update {
             out.updates,
             vec![fetch::refs::Update {
                 mode: fetch::refs::update::Mode::NoChangeNeeded,
+                type_change: Some(fetch::refs::update::TypeChange::DirectToSymbolic),
                 edit_index: Some(0)
             }],
         );
@@ -349,6 +704,7 @@ mod update {
             out.updates,
             vec![fetch::refs::Update {
                 mode: fetch::refs::update::Mode::New,
+                type_change: None,
                 edit_index: Some(0),
             }],
         );
@@ -376,7 +732,7 @@ mod update {
         let (mut mappings, specs) = mapping_from_spec("HEAD:refs/remotes/origin/new-HEAD", &repo);
         mappings.push(Mapping {
             remote: Source::Ref(gix_protocol::handshake::Ref::Direct {
-                full_ref_name: "refs/heads/main".try_into().unwrap(),
+                full_ref_name: "refs/heads/main".into(),
                 object: hex_to_id("f99771fe6a1b535783af3163eba95a927aae21d5"),
             }),
             local: Some("refs/remotes/origin/main".into()),
@@ -399,10 +755,12 @@ mod update {
             vec![
                 fetch::refs::Update {
                     mode: fetch::refs::update::Mode::New,
+                    type_change: None,
                     edit_index: Some(0),
                 },
                 fetch::refs::Update {
                     mode: fetch::refs::update::Mode::NoChangeNeeded,
+                    type_change: None,
                     edit_index: Some(1),
                 }
             ],
@@ -446,6 +804,7 @@ mod update {
             out.updates,
             vec![fetch::refs::Update {
                 mode: fetch::refs::update::Mode::FastForward,
+                type_change: None,
                 edit_index: Some(0),
             }],
             "The caller has to be aware and note that dry-runs can't know about fast-forwards as they don't have remote objects"
@@ -480,6 +839,7 @@ mod update {
             out.updates,
             vec![fetch::refs::Update {
                 mode: fetch::refs::update::Mode::RejectedNonFastForward,
+                type_change: None,
                 edit_index: None,
             }]
         );
@@ -502,6 +862,7 @@ mod update {
             out.updates,
             vec![fetch::refs::Update {
                 mode: fetch::refs::update::Mode::FastForward,
+                type_change: None,
                 edit_index: Some(0),
             }]
         );
@@ -535,6 +896,7 @@ mod update {
             out.updates,
             vec![fetch::refs::Update {
                 mode: fetch::refs::update::Mode::FastForward,
+                type_change: None,
                 edit_index: Some(0),
             }]
         );
@@ -548,25 +910,28 @@ mod update {
         }
     }
 
-    fn mapping_from_spec(spec: &str, repo: &gix::Repository) -> (Vec<fetch::Mapping>, Vec<gix::refspec::RefSpec>) {
+    fn mapping_from_spec(
+        spec: &str,
+        remote_repo: &gix::Repository,
+    ) -> (Vec<fetch::refmap::Mapping>, Vec<gix::refspec::RefSpec>) {
         let spec = gix_refspec::parse(spec.into(), gix_refspec::parse::Operation::Fetch).unwrap();
         let group = gix_refspec::MatchGroup::from_fetch_specs(Some(spec));
-        let references = repo.references().unwrap();
+        let references = remote_repo.references().unwrap();
         let mut references: Vec<_> = references.all().unwrap().map(|r| into_remote_ref(r.unwrap())).collect();
-        references.push(into_remote_ref(repo.find_reference("HEAD").unwrap()));
+        references.push(into_remote_ref(remote_repo.find_reference("HEAD").unwrap()));
         let mappings = group
-            .match_remotes(references.iter().map(remote_ref_to_item))
+            .match_lhs(references.iter().map(remote_ref_to_item))
             .mappings
             .into_iter()
-            .map(|m| fetch::Mapping {
-                remote: m
-                    .item_index
-                    .map(|idx| fetch::Source::Ref(references[idx].clone()))
-                    .unwrap_or_else(|| match m.lhs {
-                        gix_refspec::match_group::SourceRef::ObjectId(id) => fetch::Source::ObjectId(id),
+            .map(|m| fetch::refmap::Mapping {
+                remote: m.item_index.map_or_else(
+                    || match m.lhs {
+                        gix_refspec::match_group::SourceRef::ObjectId(id) => fetch::refmap::Source::ObjectId(id),
                         _ => unreachable!("not a ref, must be id: {:?}", m),
-                    }),
-                local: m.rhs.map(|r| r.into_owned()),
+                    },
+                    |idx| fetch::refmap::Source::Ref(references[idx].clone()),
+                ),
+                local: m.rhs.map(std::borrow::Cow::into_owned),
                 spec_index: SpecIndex::ExplicitInRemote(m.spec_index),
             })
             .collect();
@@ -576,17 +941,20 @@ mod update {
     fn into_remote_ref(mut r: gix::Reference<'_>) -> gix_protocol::handshake::Ref {
         let full_ref_name = r.name().as_bstr().into();
         match r.target() {
-            TargetRef::Peeled(id) => gix_protocol::handshake::Ref::Direct {
+            TargetRef::Object(id) => gix_protocol::handshake::Ref::Direct {
                 full_ref_name,
                 object: id.into(),
             },
             TargetRef::Symbolic(name) => {
                 let target = name.as_bstr().into();
-                let id = r.peel_to_id_in_place().unwrap();
-                gix_protocol::handshake::Ref::Symbolic {
-                    full_ref_name,
-                    target,
-                    object: id.detach(),
+                match r.peel_to_id_in_place() {
+                    Ok(id) => gix_protocol::handshake::Ref::Symbolic {
+                        full_ref_name,
+                        target,
+                        tag: None,
+                        object: id.detach(),
+                    },
+                    Err(_) => gix_protocol::handshake::Ref::Unborn { full_ref_name, target },
                 }
             }
         }
@@ -594,9 +962,10 @@ mod update {
 
     fn remote_ref_to_item(r: &gix_protocol::handshake::Ref) -> gix_refspec::match_group::Item<'_> {
         let (full_ref_name, target, object) = r.unpack();
+        static NULL: gix_hash::ObjectId = gix_hash::Kind::Sha1.null();
         gix_refspec::match_group::Item {
             full_ref_name,
-            target: target.expect("no unborn HEAD"),
+            target: target.unwrap_or(NULL.as_ref()),
             object,
         }
     }

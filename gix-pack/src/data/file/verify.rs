@@ -14,7 +14,7 @@ pub mod checksum {
 impl File {
     /// The checksum in the trailer of this pack data file
     pub fn checksum(&self) -> gix_hash::ObjectId {
-        gix_hash::ObjectId::from(&self.data[self.data.len() - self.hash_len..])
+        gix_hash::ObjectId::from_bytes_or_panic(&self.data[self.data.len() - self.hash_len..])
     }
 
     /// Verifies that the checksum of the packfile over all bytes preceding it indeed matches the actual checksum,
@@ -27,7 +27,7 @@ impl File {
     /// even more thorough integrity check.
     pub fn verify_checksum(
         &self,
-        progress: impl Progress,
+        progress: &mut dyn Progress,
         should_interrupt: &AtomicBool,
     ) -> Result<gix_hash::ObjectId, checksum::Error> {
         crate::verify::checksum_on_disk_or_mmap(

@@ -1,6 +1,6 @@
 /// Configure how the [`RequestWriter`][crate::client::RequestWriter] behaves when writing bytes.
-#[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default, PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WriteMode {
     /// Each [write()][std::io::Write::write()] call writes the bytes verbatim as one or more packet lines.
     ///
@@ -11,19 +11,14 @@ pub enum WriteMode {
     ///
     /// This mode also indicates that the lines written fit into memory, hence the transport may chose to not stream it but to buffer it
     /// instead. This is relevant for some transports, like the one for HTTP.
+    #[default]
     OneLfTerminatedLinePerWriteCall,
-}
-
-impl Default for WriteMode {
-    fn default() -> Self {
-        WriteMode::OneLfTerminatedLinePerWriteCall
-    }
 }
 
 /// The kind of packet line to write when transforming a [`RequestWriter`][crate::client::RequestWriter] into an
 /// [`ExtendedBufRead`][crate::client::ExtendedBufRead].
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MessageKind {
     /// A `flush` packet.
     Flush,
@@ -45,6 +40,8 @@ pub(crate) mod connect {
         #[cfg(feature = "blocking-client")]
         /// Options to use if the scheme of the URL is `ssh`.
         pub ssh: crate::client::ssh::connect::Options,
+        /// If `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
+        pub trace: bool,
     }
 
     /// The error used in [`connect()`][crate::connect()].
@@ -115,6 +112,8 @@ mod error {
     #[derive(thiserror::Error, Debug)]
     #[allow(missing_docs)]
     pub enum Error {
+        #[error("A request was performed without performing the handshake first")]
+        MissingHandshake,
         #[error("An IO error occurred when talking to the server")]
         Io(#[from] std::io::Error),
         #[error("Capabilities could not be parsed")]
@@ -143,6 +142,8 @@ mod error {
         Http(#[from] HttpError),
         #[error(transparent)]
         SshInvocation(SshInvocationError),
+        #[error("The repository path '{path}' could be mistaken for a command-line argument")]
+        AmbiguousPath { path: BString },
     }
 
     impl crate::IsSpuriousError for Error {

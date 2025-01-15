@@ -12,7 +12,7 @@ use crate::{
 /// Represents an entry within a multi index file, effectively mapping object [`IDs`][gix_hash::ObjectId] to pack data
 /// files and the offset within.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry {
     /// The ID of the object.
     pub oid: gix_hash::ObjectId,
@@ -51,7 +51,7 @@ impl File {
     ///
     /// It can be used to validate it didn't change after creation.
     pub fn checksum(&self) -> gix_hash::ObjectId {
-        gix_hash::ObjectId::from(&self.data[self.data.len() - self.hash_len..])
+        gix_hash::ObjectId::from_bytes_or_panic(&self.data[self.data.len() - self.hash_len..])
     }
     /// Return all names of index files (`*.idx`) whose objects we contain.
     ///
@@ -89,7 +89,7 @@ impl File {
             prefix,
             candidates,
             &self.fan,
-            |idx| self.oid_at_index(idx),
+            &|idx| self.oid_at_index(idx),
             self.num_objects,
         )
     }
@@ -98,7 +98,7 @@ impl File {
     ///
     /// Use this index for finding additional information via [`File::pack_id_and_pack_offset_at_index()`].
     pub fn lookup(&self, id: impl AsRef<gix_hash::oid>) -> Option<EntryIndex> {
-        crate::index::access::lookup(id, &self.fan, |idx| self.oid_at_index(idx))
+        crate::index::access::lookup(id.as_ref(), &self.fan, &|idx| self.oid_at_index(idx))
     }
 
     /// Given the `index` ranging from 0 to [File::num_objects()], return the pack index and its absolute offset into the pack.
@@ -121,10 +121,10 @@ impl File {
                 let from = offsets_64 + (ofs32 ^ HIGH_BIT) as usize * 8;
                 crate::read_u64(&self.data[from..][..8])
             } else {
-                ofs32 as u64
+                u64::from(ofs32)
             }
         } else {
-            ofs32 as u64
+            u64::from(ofs32)
         };
         (pack_index, pack_offset)
     }

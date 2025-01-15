@@ -1,5 +1,7 @@
-use crate::bstr::{BStr, BString, ByteVec};
-use crate::config::tree::key::validate_assignment;
+use crate::{
+    bstr::{BStr, BString, ByteVec},
+    config::tree::key::validate_assignment,
+};
 
 /// Provide information about a configuration section.
 pub trait Section {
@@ -193,5 +195,30 @@ pub trait Key: std::fmt::Debug {
         key.push(b'=');
         key.push_str(value);
         Ok(key)
+    }
+}
+
+impl gix_config::AsKey for &dyn Key {
+    fn as_key(&self) -> gix_config::KeyRef<'_> {
+        self.try_as_key().expect("infallible")
+    }
+
+    fn try_as_key(&self) -> Option<gix_config::KeyRef<'_>> {
+        let section_name = self
+            .section()
+            .parent()
+            .map_or_else(|| self.section().name(), Section::name);
+        let subsection_name = if self.section().parent().is_some() {
+            Some(self.section().name().into())
+        } else {
+            None
+        };
+        let value_name = self.name();
+        gix_config::KeyRef {
+            section_name,
+            subsection_name,
+            value_name,
+        }
+        .into()
     }
 }

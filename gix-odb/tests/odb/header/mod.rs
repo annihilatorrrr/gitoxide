@@ -1,14 +1,14 @@
 use crate::{hex_to_id, odb::db};
 
 fn find_header(db: impl gix_odb::Header, hex_id: &str) -> gix_odb::find::Header {
-    db.try_header(hex_to_id(hex_id))
+    db.try_header(&hex_to_id(hex_id))
         .expect("no read error")
         .expect("object exists")
 }
 
 #[test]
 fn loose_object() {
-    find_header(&db(), "37d4e6c5c48ba0d245164c4e10d5f41140cab980");
+    find_header(db(), "37d4e6c5c48ba0d245164c4e10d5f41140cab980");
 }
 
 #[test]

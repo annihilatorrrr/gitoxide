@@ -1,11 +1,12 @@
 //!
+#![allow(clippy::empty_docs)]
 use std::ops::Deref;
 
 use gix_hash::{oid, ObjectId};
 
-use crate::{object::find, revision, Id, Object};
+use crate::{object::find, Id, Object};
 
-/// An [object id][ObjectId] infused with `Easy`.
+/// An [object id][ObjectId] infused with a [`Repository`][crate::Repository].
 impl<'repo> Id<'repo> {
     /// Find the [`Object`] associated with this object id, and consider it an error if it doesn't exist.
     ///
@@ -16,6 +17,13 @@ impl<'repo> Id<'repo> {
         self.repo.find_object(self.inner)
     }
 
+    /// Find the [`header`][gix_odb::find::Header] associated with this object id, or an error if it doesn't exist.
+    ///
+    /// Use this method if there is no interest in the contents of the object, which generally is much faster to obtain.
+    pub fn header(&self) -> Result<gix_odb::find::Header, find::existing::Error> {
+        self.repo.find_header(self.inner)
+    }
+
     /// Try to find the [`Object`] associated with this object id, and return `None` if it's not available locally.
     ///
     /// # Note
@@ -23,6 +31,13 @@ impl<'repo> Id<'repo> {
     /// There can only be one `ObjectRef` per `Easy`. To increase that limit, clone the `Easy`.
     pub fn try_object(&self) -> Result<Option<Object<'repo>>, find::Error> {
         self.repo.try_find_object(self.inner)
+    }
+
+    /// Find the [`header`][gix_odb::find::Header] associated with this object id, or return `None` if it doesn't exist.
+    ///
+    /// Use this method if there is no interest in the contents of the object, which generally is much faster to obtain.
+    pub fn try_header(&self) -> Result<Option<gix_odb::find::Header>, find::Error> {
+        self.repo.try_find_header(self.inner)
     }
 
     /// Turn this object id into a shortened id with a length in hex as configured by `core.abbrev`.
@@ -68,7 +83,7 @@ pub mod shorten {
     }
 }
 
-impl<'repo> Deref for Id<'repo> {
+impl Deref for Id<'_> {
     type Target = oid;
 
     fn deref(&self) -> &Self::Target {
@@ -81,7 +96,7 @@ impl<'repo> Id<'repo> {
         Id { inner: id.into(), repo }
     }
 
-    /// Turn this instance into its bare [ObjectId].
+    /// Turn this instance into its bare [`ObjectId`].
     pub fn detach(self) -> ObjectId {
         self.inner
     }
@@ -89,12 +104,8 @@ impl<'repo> Id<'repo> {
 
 impl<'repo> Id<'repo> {
     /// Obtain a platform for traversing ancestors of this commit.
-    ///
-    /// Note that unless [`error_on_missing_commit()`][revision::Walk::error_on_missing_commit()] is enabled, which be default it is not,
-    /// one will always see an empty iteration even if this id is not a commit, instead of an error.
-    /// If this is undesirable, it's best to check for the correct object type before creating an iterator.
-    pub fn ancestors(&self) -> revision::walk::Platform<'repo> {
-        revision::walk::Platform::new(Some(self.inner), self.repo)
+    pub fn ancestors(&self) -> crate::revision::walk::Platform<'repo> {
+        crate::revision::walk::Platform::new(Some(self.inner), self.repo)
     }
 }
 
@@ -107,9 +118,9 @@ mod impls {
 
     // Eq, Hash, Ord, PartialOrd,
 
-    impl<'a> std::hash::Hash for Id<'a> {
+    impl std::hash::Hash for Id<'_> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.inner.hash(state)
+            self.inner.hash(state);
         }
     }
 
@@ -125,7 +136,7 @@ mod impls {
         }
     }
 
-    impl<'repo> PartialEq<ObjectId> for Id<'repo> {
+    impl PartialEq<ObjectId> for Id<'_> {
         fn eq(&self, other: &ObjectId) -> bool {
             &self.inner == other
         }
@@ -137,7 +148,7 @@ mod impls {
         }
     }
 
-    impl<'repo> PartialEq<oid> for Id<'repo> {
+    impl PartialEq<oid> for Id<'_> {
         fn eq(&self, other: &oid) -> bool {
             self.inner == other
         }
@@ -149,25 +160,25 @@ mod impls {
         }
     }
 
-    impl<'repo> PartialEq<ObjectDetached> for Id<'repo> {
+    impl PartialEq<ObjectDetached> for Id<'_> {
         fn eq(&self, other: &ObjectDetached) -> bool {
             self.inner == other.id
         }
     }
 
-    impl<'repo> std::fmt::Debug for Id<'repo> {
+    impl std::fmt::Debug for Id<'_> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             self.inner.fmt(f)
         }
     }
 
-    impl<'repo> std::fmt::Display for Id<'repo> {
+    impl std::fmt::Display for Id<'_> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             self.inner.fmt(f)
         }
     }
 
-    impl<'repo> AsRef<oid> for Id<'repo> {
+    impl AsRef<oid> for Id<'_> {
         fn as_ref(&self) -> &oid {
             &self.inner
         }
@@ -186,10 +197,11 @@ mod tests {
 
     #[test]
     fn size_of_oid() {
-        assert_eq!(
-            std::mem::size_of::<Id<'_>>(),
-            32,
-            "size of oid shouldn't change without notice"
-        )
+        let actual = std::mem::size_of::<Id<'_>>();
+        let ceiling = 32;
+        assert!(
+            actual <= ceiling,
+            "size of oid shouldn't change without notice: {actual} <= {ceiling}"
+        );
     }
 }

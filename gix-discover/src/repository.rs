@@ -14,8 +14,10 @@ pub enum Path {
     /// The currently checked out or nascent work tree of a git repository
     WorkTree(PathBuf),
     /// The git repository itself, typically bare and without known worktree.
+    /// It could also be non-bare with a worktree configured using git configuration, or no worktree at all despite
+    /// not being bare (due to mis-configuration for example).
     ///
-    /// Note that it might still have linked work-trees which can be accessed later, weather bare or not, or it might be a
+    /// Note that it might still have linked work-trees which can be accessed later, bare or not, or it might be a
     /// submodule git directory in the `.git/modules/**/<name>` directory of the parent repository.
     Repository(PathBuf),
 }
@@ -48,25 +50,20 @@ mod path {
         /// as needed.
         ///
         /// `None` is returned if `dir` could not be resolved due to being relative and trying to reach outside of the filesystem root.
-        pub fn from_dot_git_dir(
-            dir: impl Into<PathBuf>,
-            kind: Kind,
-            current_dir: impl AsRef<std::path::Path>,
-        ) -> Option<Self> {
-            let cwd = current_dir.as_ref();
+        pub fn from_dot_git_dir(dir: PathBuf, kind: Kind, current_dir: &std::path::Path) -> Option<Self> {
+            let cwd = current_dir;
             let normalize_on_trailing_dot_dot = |dir: PathBuf| -> Option<PathBuf> {
-                if !matches!(dir.components().rev().next(), Some(std::path::Component::ParentDir)) {
+                if !matches!(dir.components().next_back(), Some(std::path::Component::ParentDir)) {
                     dir
                 } else {
-                    gix_path::normalize(&dir, cwd)?.into_owned()
+                    gix_path::normalize(dir.into(), cwd)?.into_owned()
                 }
                 .into()
             };
 
-            let dir = dir.into();
             match kind {
                 Kind::Submodule { git_dir } => Path::LinkedWorkTree {
-                    git_dir: gix_path::normalize(git_dir, cwd)?.into_owned(),
+                    git_dir: gix_path::normalize(git_dir.into(), cwd)?.into_owned(),
                     work_dir: without_dot_git_dir(normalize_on_trailing_dot_dot(dir)?),
                 },
                 Kind::SubmoduleGitDir => Path::Repository(dir),
@@ -83,7 +80,7 @@ mod path {
                         Path::WorkTree(work_dir)
                     }
                 },
-                Kind::Bare => Path::Repository(dir),
+                Kind::PossiblyBare => Path::Repository(dir),
             }
             .into()
         }
@@ -94,7 +91,7 @@ mod path {
                     linked_git_dir: Some(git_dir.to_owned()),
                 },
                 Path::WorkTree(_) => Kind::WorkTree { linked_git_dir: None },
-                Path::Repository(_) => Kind::Bare,
+                Path::Repository(_) => Kind::PossiblyBare,
             }
         }
 
@@ -115,7 +112,14 @@ pub enum Kind {
     /// A bare repository does not have a work tree, that is files on disk beyond the `git` repository itself.
     ///
     /// Note that this is merely a guess at this point as we didn't read the configuration yet.
-    Bare,
+    ///
+    /// Also note that due to optimizing for performance and *just* making an educated *guess in some situations*,
+    /// we may consider a non-bare repository bare if it doesn't have an index yet due to be freshly initialized.
+    /// The caller has to handle this, typically by reading the configuration.
+    ///
+    /// It could also be a directory which is non-bare by configuration, but is *not* named `.git`.
+    /// Unusual, but it's possible that a worktree is configured via `core.worktree`.
+    PossiblyBare,
     /// A `git` repository along with checked out files in a work tree.
     WorkTree {
         /// If set, this is the git dir associated with this _linked_ worktree.
@@ -140,6 +144,6 @@ pub enum Kind {
 impl Kind {
     /// Returns true if this is a bare repository, one without a work tree.
     pub fn is_bare(&self) -> bool {
-        matches!(self, Kind::Bare)
+        matches!(self, Kind::PossiblyBare)
     }
 }

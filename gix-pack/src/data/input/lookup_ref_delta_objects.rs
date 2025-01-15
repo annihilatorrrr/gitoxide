@@ -1,14 +1,12 @@
-use std::convert::TryInto;
-
 use gix_hash::ObjectId;
 
 use crate::data::{entry::Header, input};
 
 /// An iterator to resolve thin packs on the fly.
-pub struct LookupRefDeltaObjectsIter<I, LFn> {
+pub struct LookupRefDeltaObjectsIter<I, Find> {
     /// The inner iterator whose entries we will resolve.
     pub inner: I,
-    lookup: LFn,
+    lookup: Find,
     /// The cached delta to provide next time we are called, it's the delta to go with the base we just resolved in its place.
     next_delta: Option<input::Entry>,
     /// Fuse to stop iteration after first missing object.
@@ -21,14 +19,14 @@ pub struct LookupRefDeltaObjectsIter<I, LFn> {
     buf: Vec<u8>,
 }
 
-impl<I, LFn> LookupRefDeltaObjectsIter<I, LFn>
+impl<I, Find> LookupRefDeltaObjectsIter<I, Find>
 where
     I: Iterator<Item = Result<input::Entry, input::Error>>,
-    LFn: for<'a> FnMut(ObjectId, &'a mut Vec<u8>) -> Option<gix_object::Data<'a>>,
+    Find: gix_object::Find,
 {
     /// Create a new instance wrapping `iter` and using `lookup` as function to retrieve objects that will serve as bases
     /// for ref deltas seen while traversing `iter`.
-    pub fn new(iter: I, lookup: LFn) -> Self {
+    pub fn new(iter: I, lookup: Find) -> Self {
         LookupRefDeltaObjectsIter {
             inner: iter,
             lookup,
@@ -47,13 +45,7 @@ where
 
     /// positive `size_change` values mean an object grew or was more commonly, was inserted. Negative values
     /// mean the object shrunk, usually because there header changed from ref-deltas to ofs deltas.
-    fn track_change(
-        &mut self,
-        shifted_pack_offset: u64,
-        pack_offset: u64,
-        size_change: i64,
-        oid: impl Into<Option<ObjectId>>,
-    ) {
+    fn track_change(&mut self, shifted_pack_offset: u64, pack_offset: u64, size_change: i64, oid: Option<ObjectId>) {
         if size_change == 0 {
             return;
         }
@@ -61,7 +53,7 @@ where
             shifted_pack_offset,
             pack_offset,
             size_change_in_bytes: size_change,
-            oid: oid.into().unwrap_or_else(||
+            oid: oid.unwrap_or_else(||
                 // NOTE: this value acts as sentinel and the actual hash kind doesn't matter.
                 gix_hash::Kind::Sha1.null()),
         });
@@ -75,16 +67,16 @@ where
         let previous_header_size = entry.header_size;
         entry.header_size = entry.header.size(entry.decompressed_size) as u16;
 
-        let change = entry.header_size as i64 - previous_header_size as i64;
+        let change = i64::from(entry.header_size) - i64::from(previous_header_size);
         entry.crc32 = Some(entry.compute_crc32());
         self.track_change(entry.pack_offset, pack_offset, change, None);
     }
 }
 
-impl<I, LFn> Iterator for LookupRefDeltaObjectsIter<I, LFn>
+impl<I, Find> Iterator for LookupRefDeltaObjectsIter<I, Find>
 where
     I: Iterator<Item = Result<input::Entry, input::Error>>,
-    LFn: for<'a> FnMut(ObjectId, &'a mut Vec<u8>) -> Option<gix_object::Data<'a>>,
+    Find: gix_object::Find,
 {
     type Item = Result<input::Entry, input::Error>;
 
@@ -100,7 +92,7 @@ where
                 Header::RefDelta { base_id } => {
                     match self.inserted_entry_length_at_offset.iter().rfind(|e| e.oid == base_id) {
                         None => {
-                            let base_entry = match (self.lookup)(base_id, &mut self.buf) {
+                            let base_entry = match self.lookup.try_find(&base_id, &mut self.buf).ok()? {
                                 Some(obj) => {
                                     let current_pack_offset = entry.pack_offset;
                                     let mut entry = match input::Entry::from_data_obj(&obj, 0) {
@@ -112,7 +104,7 @@ where
                                         entry.pack_offset,
                                         current_pack_offset,
                                         entry.bytes_in_pack() as i64,
-                                        base_id,
+                                        Some(base_id),
                                     );
                                     entry
                                 }
@@ -193,7 +185,7 @@ where
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (min, max) = self.inner.size_hint();
-        max.map(|max| (min, Some(max * 2))).unwrap_or_else(|| (min * 2, None))
+        max.map_or_else(|| (min * 2, None), |max| (min, Some(max * 2)))
     }
 }
 

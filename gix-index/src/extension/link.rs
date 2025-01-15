@@ -43,7 +43,7 @@ pub(crate) fn decode(data: &[u8], object_hash: gix_hash::Kind) -> Result<Link, d
         .ok_or(decode::Error::Corrupt(
             "link extension too short to read share index checksum",
         ))
-        .map(|(id, d)| (gix_hash::ObjectId::from(id), d))?;
+        .map(|(id, d)| (gix_hash::ObjectId::from_bytes_or_panic(id), d))?;
 
     if data.is_empty() {
         return Ok(Link {
@@ -72,6 +72,7 @@ impl Link {
         self,
         split_index: &mut crate::File,
         object_hash: gix_hash::Kind,
+        skip_hash: bool,
         options: crate::decode::Options,
     ) -> Result<(), crate::file::init::Error> {
         let shared_index_path = split_index
@@ -80,8 +81,9 @@ impl Link {
             .expect("split index file in .git folder")
             .join(format!("sharedindex.{}", self.shared_index_checksum));
         let mut shared_index = crate::File::at(
-            &shared_index_path,
+            shared_index_path,
             object_hash,
+            skip_hash,
             crate::decode::Options {
                 expected_checksum: self.shared_index_checksum.into(),
                 ..options

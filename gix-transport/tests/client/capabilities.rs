@@ -39,7 +39,7 @@ fn from_bytes() -> crate::Result {
     );
     assert_eq!(
         caps.iter()
-            .filter_map(|c| c.value().map(|v| v.to_owned()))
+            .filter_map(|c| c.value().map(ToOwned::to_owned))
             .collect::<Vec<_>>(),
         vec![
             b"HEAD:refs/heads/master".as_bstr(),
@@ -47,5 +47,20 @@ fn from_bytes() -> crate::Result {
             b"git/2.28.0".as_bstr()
         ]
     );
+    Ok(())
+}
+
+#[maybe_async::test(feature = "blocking-client", async(feature = "async-client", async_std::test))]
+async fn from_lines_with_version_detection_v0() -> crate::Result {
+    let mut buf = Vec::<u8>::new();
+    gix_packetline::encode::flush_to_write(&mut buf).await?;
+    let mut stream =
+        gix_packetline::StreamingPeekableIter::new(buf.as_slice(), &[gix_packetline::PacketLineRef::Flush], false);
+    let caps = Capabilities::from_lines_with_version_detection(&mut stream)
+        .await
+        .expect("we can parse V0 as very special case, useful for testing stateful connections in other crates")
+        .capabilities;
+    assert!(caps.contains("multi_ack_detailed"));
+    assert!(caps.contains("side-band-64k"));
     Ok(())
 }

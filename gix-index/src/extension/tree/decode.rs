@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 use gix_hash::ObjectId;
 
 use crate::{
@@ -22,14 +20,14 @@ fn one_recursive(data: &[u8], hash_len: usize) -> Option<(Tree, &[u8])> {
     let (path, data) = split_at_byte_exclusive(data, 0)?;
 
     let (entry_count, data) = split_at_byte_exclusive(data, b' ')?;
-    let num_entries: i32 = atoi::atoi(entry_count)?;
+    let num_entries: i32 = gix_utils::btoi::to_signed(entry_count).ok()?;
 
     let (subtree_count, data) = split_at_byte_exclusive(data, b'\n')?;
-    let subtree_count: usize = atoi::atoi(subtree_count)?;
+    let subtree_count: usize = gix_utils::btoi::to_unsigned(subtree_count).ok()?;
 
     let (id, mut data) = if num_entries >= 0 {
         let (hash, data) = split_at_pos(data, hash_len)?;
-        (ObjectId::from(hash), data)
+        (ObjectId::from_bytes_or_panic(hash), data)
     } else {
         (
             ObjectId::null(gix_hash::Kind::from_hex_len(hash_len * 2).expect("valid hex_len")),

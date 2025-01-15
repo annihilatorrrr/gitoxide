@@ -1,21 +1,24 @@
+lints.workspace = true
+
 [package]
 name = "gix-traverse-tests"
 version = "0.0.0"
-repository = "https://github.com/Byron/gitoxide"
-license = "MIT/Apache-2.0"
-description = "Please use `gix-<thiscrate>` instead ('git' -> 'gix')"
+repository = "https://github.com/GitoxideLabs/gitoxide"
+license = "MIT OR Apache-2.0"
+description = "Integration tests for the gix-traverse crate"
 authors = ["Sebastian Thiel <sebastian.thiel@icloud.com>"]
 edition = "2021"
-include = ["src/**/*"]
-rust-version = "1.64"
+rust-version = "1.70"
 
 [[test]]
-name ="test"
-path = "traverse.rs"
+name = "traverse"
+path = "traverse/main.rs"
 
 [dev-dependencies]
+insta = "1.40.0"
 gix-traverse = { path = ".." }
 gix-testtools = { path = "../../tests/tools" }
 gix-odb = { path = "../../gix-odb" }
 gix-hash = { path = "../../gix-hash" }
 gix-object = { path = "../../gix-object" }
+gix-commitgraph = { path = "../../gix-commitgraph" }

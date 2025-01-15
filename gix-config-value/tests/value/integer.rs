@@ -1,5 +1,3 @@
-use std::convert::TryFrom;
-
 use gix_config_value::{integer::Suffix, Integer};
 
 use crate::b;
@@ -53,6 +51,7 @@ fn invalid_from_str() {
     assert!(Integer::try_from(b("g")).is_err());
     assert!(Integer::try_from(b("123123123123123123123123")).is_err());
     assert!(Integer::try_from(b("gg")).is_err());
+    assert!(Integer::try_from(b("™️🤦‍♂️")).is_err());
 }
 
 #[test]

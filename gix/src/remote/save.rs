@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 use crate::{
     bstr::{BStr, BString},
     config, remote, Remote,
@@ -25,15 +23,16 @@ pub enum AsError {
     Name(#[from] crate::remote::name::Error),
 }
 
-/// Serialize into gix-config.
+/// Serialize into git-config.
 impl Remote<'_> {
     /// Save ourselves to the given `config` if we are a named remote or fail otherwise.
     ///
     /// Note that all sections named `remote "<name>"` will be cleared of all values we are about to write,
     /// and the last `remote "<name>"` section will be containing all relevant values so that reloading the remote
     /// from `config` would yield the same in-memory state.
+    #[allow(clippy::result_large_err)]
     pub fn save_to(&self, config: &mut gix_config::File<'static>) -> Result<(), Error> {
-        fn as_key(name: &str) -> gix_config::parse::section::Key<'_> {
+        fn as_key(name: &str) -> gix_config::parse::section::ValueName<'_> {
             name.try_into().expect("valid")
         }
         let name = self.name().ok_or_else(|| Error::NameMissing {
@@ -109,6 +108,7 @@ impl Remote<'_> {
     /// Note that this sets a name for anonymous remotes, but overwrites the name for those who were named before.
     /// If this name is different from the current one, the git configuration will still contain the previous name,
     /// and the caller should account for that.
+    #[allow(clippy::result_large_err)]
     pub fn save_as_to(
         &mut self,
         name: impl Into<BString>,

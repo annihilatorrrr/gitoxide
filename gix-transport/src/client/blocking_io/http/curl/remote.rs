@@ -157,6 +157,7 @@ pub fn new() -> (
                     verbose,
                     ssl_ca_info,
                     ssl_version,
+                    ssl_verify,
                     http_version,
                     backend,
                 },
@@ -193,6 +194,9 @@ pub fn new() -> (
                     handle.ssl_min_max_version(to_curl_ssl_version(min), to_curl_ssl_version(max))?;
                 }
             }
+
+            handle.ssl_verify_peer(ssl_verify)?;
+            handle.ssl_verify_host(ssl_verify)?;
 
             if let Some(http_version) = http_version {
                 let version = match http_version {
@@ -269,7 +273,7 @@ pub fn new() -> (
                 handler.send_data = Some(send);
                 let (send, receive_headers) = pipe::unidirectional(1);
                 handler.send_header = Some(send);
-                let (send_body, receive_body) = pipe::unidirectional(None);
+                let (send_body, receive_body) = pipe::unidirectional(0);
                 (receive_data, receive_headers, send_body, receive_body)
             };
 
@@ -322,7 +326,7 @@ pub fn new() -> (
                 handler.receive_body.take();
                 match (handler.send_header.take(), handler.send_data.take()) {
                     (Some(header), mut data) => {
-                        if let Err(TrySendError::Disconnected(err)) | Err(TrySendError::Full(err)) =
+                        if let Err(TrySendError::Disconnected(err) | TrySendError::Full(err)) =
                             header.channel.try_send(err)
                         {
                             if let Some(body) = data.take() {

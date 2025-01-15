@@ -8,7 +8,7 @@ of the implementation.
 with the potential to become the preferred way to interact with git repositories.
 
 Please note that all functionality comes from the `gitoxide-core` library, which mirrors these capabilities
-and itself relies on all `git-*` crates. It's not meant for consumption, for application development, please use `gix`.
+and itself relies on all `gix-*` crates. It's not meant for consumption, for application development, please use `gix`.
 
 * **the `ein` program** - convenient and for humans
     * [x] **init** - initialize a new non-bare repository with a `main` branch
@@ -19,76 +19,163 @@ and itself relies on all `git-*` crates. It's not meant for consumption, for app
         * [x] **estimate-hours** - estimate the time invested into a repository by evaluating commit dates.
             * Based on the [git-hours] algorithm.
             * See the [discussion][git-hours-discussion] for some performance data.
-* **the `gix` program** _(plumbing)_ - lower level commands for use in automation
-    * **progress** - provide an overview of what works and what doesn't from the perspective of the git configuration.
-      This is likely to change a lot over time depending on actual needs, but maybe useful for you to see
-      if particular git-configuration is picked up and where it deviates.
-    * **config** - list the complete git configuration in human-readable form and optionally filter sections by name.
-    * **exclude**
-        * [x] **query** - check if path specs are excluded via gits exclusion rules like `.gitignore`.
-    * **verify** - validate a whole repository, for now only the object database.
-    * **commit**
-        * [x] **describe** - identify a commit by its closest tag in its past
-    * **tree**
-        * [x] **entries** - list tree entries for a single tree or recursively
-        * [x] **info** - display tree statistics
-    * **odb**
-        * [x] **info** - display odb statistics
-        * [x] **entries** - display all object ids in the object database
-    * **mailmap**
-        * [x] **entries** - display all entries of the aggregated mailmap git would use for substitution
-    * **revision**
-        * [x] **list** - list plain revision hashes from a starting point, similar to a very simple version of `git rev-list`.
-        * [x] **explain** - show what would be done while parsing a revision specification like `HEAD~1`
-        * [x] **resolve** - show which objects a revspec resolves to, similar to `git rev-parse` but faster and with much better error handling
-        * [x] **previous-branches** - list all previously checked out branches, powered by the ref-log.
-    * **remote**
-        * [x] **refs** - list all references available on the remote based on the current remote configuration.
-        * [x] **ref-map** - show how remote references relate to their local tracking branches as mapped by refspecs.
-    * [x] **fetch** - fetch the current remote or the given one, optionally just as dry-run.
-    * **clone**
-        * [x] initialize a new **bare** repository and fetch all objects.
-        * [x] initialize a new repository, fetch all objects and checkout the main worktree.
-    * **credential**
-        * [x] **fill/approve/reject** - The same as `git credential`, but implemented in Rust, calling helpers only when from trusted configuration.
-    * **free** - no git repository necessary
-        * **pack**
-            * [x] [verify](https://asciinema.org/a/352942)
-            * [x] [index verify](https://asciinema.org/a/352945) including each object sha1 and statistics
-            * [x] [explode](https://asciinema.org/a/352951), useful for transforming packs into loose objects for inspection or restoration
-                * [x] verify written objects (by reading them back from disk)
-            * [x] [receive](https://asciinema.org/a/359321) - receive a whole pack produced by **pack-send** or _git-upload-pack_, useful for `clone` like operations.
-            * [x] **create** - create a pack from given objects or tips of the commit graph.
-            * [ ] **send** - create a pack and send it using the pack protocol to stdout, similar to 'git-upload-pack',
-              for consumption by **pack-receive** or _git-receive-pack_
-            - **multi-index**
-                * [x] **info** - print information about the file
-                * [x] **create** - create a multi-index from pack indices
-                * [x] **verify** - check the file for consistency
-                * [x] **entries** - list all entries of the file
-            - **index**
-                * [x] [create](https://asciinema.org/a/352941) - create an index file by streaming a pack file as done during clone
-                    * [x] support for thin packs (as needed for fetch/pull)
-        * **commit-graph**
-            * [x] **verify** - assure that a commit-graph is consistent
-        * **mailmap**
-            * [x] **verify** - check entries of a mailmap file for parse errors and display them
-        * **index**
-            * [x] **entries** - show detailed entry information for human or machine consumption (via JSON)
-            * [x] **verify** - check the index for consistency
-            * [x] **info** - display general information about the index itself, with detailed extension information by default
-                * [x] detailed information about the TREE extension
-                * [ ] …other extensions details aren't implemented yet
-            * [x] **checkout-exclusive** - a predecessor of `git worktree`, providing flexible options to evaluate checkout performance from an index and/or an object database.
+* **the `gix` program** _(plumbing)_ - lower level commands for use during development
+    - As its main purpose is to help running the latest improvements in the real world, it's self-documenting without
+      duplicating its features here. Use `gix --help` to start discovery.
 
 [skim]: https://github.com/lotabout/skim
 [git-hours]: https://github.com/kimmobrunfeldt/git-hours/blob/8aaeee237cb9d9028e7a2592a25ad8468b1f45e4/index.js#L114-L143
-[git-hours-discussion]: https://github.com/Byron/gitoxide/discussions/78
+[git-hours-discussion]: https://github.com/GitoxideLabs/gitoxide/discussions/78
+
+### gix
+
+The top-level crate that acts as hub to all functionality provided by the `gix-*` plumbing crates.
+
+* [x] utilities for applications to make long running operations interruptible gracefully and to support timeouts in servers.
+* [x] handle `core.repositoryFormatVersion` and extensions
+* [x] support for unicode-precomposition of command-line arguments (needs explicit use in parent application)
+* [ ] strict object creation (validate objects referenced by newly created objects exist)
+* [ ] strict hash verification (validate that objects actually have the hashes they claim to have)
+* **Repository**
+    * [x] discovery
+        * [x] option to not cross file systems (default)
+        * [x] handle git-common-dir
+        * [x] support for `GIT_CEILING_DIRECTORIES` environment variable
+        * [ ] handle other non-discovery modes and provide control over environment variable usage required in applications
+    * [x] rev-parse
+       - [ ] handle relative paths as relative to working directory
+       - [x] handle `upstream` and `push` resolution.
+    * [x] rev-walk
+        * [x] include tips
+        * [ ] exclude commits
+    * [x] instantiation
+    * [x] access to refs and objects
+    * [x] create a pathspec-search from a set of strings
+        - [ ] allow to construct Pathspecs using data structure instead of enforcing them to be passed as strings.
+    * **credentials**
+        * [x] run `git credential` directly
+        * [x] use credential helper configuration and to obtain credentials with `gix_credentials::helper::Cascade`
+    * **traverse**
+        * [x] commit graphs
+        * [ ] make [git-notes](https://git-scm.com/docs/git-notes) accessible
+        * [x] tree entries
+    * **diffs/changes**
+        * [x] tree with other tree
+            * [x] respect case-sensitivity of host filesystem.
+            * [x] a way to access various diff related settings or use them
+            * [x] respect `diff.*.textconv`, `diff.*.cachetextconv` and external diff viewers with `diff.*.command`,
+              [along with support for reading `diff` gitattributes](https://github.com/git/git/blob/73876f4861cd3d187a4682290ab75c9dccadbc56/Documentation/gitattributes.txt#L699:L699).
+            * **rewrite tracking**
+                * **deviation** - git keeps up to four candidates whereas we use the first-found candidate that matches the similarity percentage.
+                  This can lead to different sources being found. As such, we also don't consider the filename at all.
+                * [x] handle binary files correctly, and apply filters for that matter
+                * [x] computation limit with observable reduction of precision when it is hit, for copies and renames separately
+                * **by identity**
+                    * [x] renames (sym-links are only ever compared by identity)
+                    * [x] copies
+                * **by similarity** - similarity factor controllable separately from renames
+                    * [x] renames
+                    * [x] copies
+                * [x] 'find-copies-harder' - find copies with the source being the entire tree.
+        * [x] tree or index with working tree
+             - [x] rename tracking
+             - [x] submodule status (recursive)
+        * [x] diffs between modified blobs with various algorithms
+        * [ ] tree with index (via index-from-tree and index)
+            - [ ] rename tracking
+            - [ ] submodule status (recursive)
+    * [x] initialize
+        * [x] Proper configuration depending on platform (e.g. ignorecase, filemode, …)
+    * **Id**
+        * [x] short hashes with detection of ambiguity.
+    * **Commit**
+        * [x] `git describe` like functionality, with optional commit-graph acceleration
+        * [x] create new commit from tree
+    * **Objects**
+        * [x] lookup
+        * [x] peel to object kind
+        * [ ] create [signed commits and tags](https://github.com/GitoxideLabs/gitoxide/issues/12)
+        * **trees**
+            * [x] lookup path
+            * [x] edit
+    * **references**
+        * [x] peel to end
+        * [x] ref-log access
+        * [x] remote name
+        * [x] find remote itself
+            - [ ] respect `branch.<name>.merge` in the returned remote.
+    * **remotes**
+        * [x] clone
+            * [x] shallow
+                * [ ] include-tags when shallow is used (needs separate fetch)
+                * [ ] prune non-existing shallow commits
+            * [ ] [bundles](https://git-scm.com/docs/git-bundle)
+        * [x] fetch
+            * [x] shallow (remains shallow, options to adjust shallow boundary)
+            * [ ] a way to auto-explode small packs to avoid them to pile up
+            * [x] 'ref-in-want'
+            * [ ] 'wanted-ref'
+            * [x] standard negotiation algorithms `consecutive`, `skipping` and `noop`.
+        * [ ] push
+        * [x] ls-refs
+        * [x] ls-refs with ref-spec filter
+        * [x] list, find by name
+        * [x] create in memory
+        * [ ] groups
+        * [ ] [remote and branch files](https://github.com/git/git/blob/master/remote.c#L300)
+    * [ ] execute hooks
+    * **refs**
+        * [ ] run transaction hooks and handle special repository states like quarantine
+        * [ ] support for different backends like `files` and `reftable`
+    * **main or linked worktree**
+        * [ ] add files with `.gitignore` handling
+        * [ ] checkout with conversions like clean + smudge as in `.gitattributes`
+        * [ ] _diff_ index with working tree
+        * [ ] sparse checkout support
+        * [x] read per-worktree config if `extensions.worktreeConfig` is enabled.
+        * **index**
+            * [ ] tree from index
+            * [x] index from tree
+    * **worktrees**
+        * [x] open a repository with worktrees
+            * [x] read locked state
+            * [ ] obtain 'prunable' information
+        * [x] proper handling of worktree related refs
+        * [x] create a byte stream and create archives for such a stream, including worktree filters and conversions
+        * [ ] create, move, remove, and repair
+        * [x] access exclude information
+        * [x] access attribute information
+        * [x] respect `core.worktree` configuration
+            - **deviation**
+                * The delicate interplay between `GIT_COMMON_DIR` and `GIT_WORK_TREE` isn't implemented.
+    * **config**
+        * [x] read the primitive types `boolean`, `integer`, `string`
+        * [x] read and interpolate trusted paths
+        * [x] low-level API for more elaborate access to all details of `git-config` files
+        * [ ] a way to make changes to individual configuration files in memory
+        * [ ] write configuration back
+        * [ ] auto-refresh configuration values after they changed on disk
+        * [ ] facilities to apply the [url-match](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httplturlgt) algorithm and to [normalize urls](https://github.com/git/git/blob/be1a02a17ede4082a86dfbfee0f54f345e8b43ac/urlmatch.c#L109:L109) before comparison.
+    * [x] mailmap
+    * [x] object replacements (`git replace`)
+    * [x] read git configuration
+    * [ ] merging
+    * [ ] stashing
+    * [ ] Use _Commit Graph_ to speed up certain queries
+    * [ ] subtree
+    * [ ] interactive rebase status/manipulation
+    * **submodules**
+        * [x] handle 'old' form for reading and detect old form
+        * [x] list
+        * [ ] edit
+* [ ] API documentation
+    * [ ] Some examples
 
 ### gix-actor
 * [x] read and write a signature that uniquely identifies an actor within a git repository
-* [ ] a way to parse `name <email>` tuples (instead of full signatures) to facilitate parsing
+* [x] a way to parse `name <email>` tuples (instead of full signatures) to facilitate parsing
       commit trailers.
+* [x] a way to write only actors, useful for commit trailers.
 
 ### gix-hash
 * types to represent hash digests to identify git objects.
@@ -101,15 +188,28 @@ and itself relies on all `git-*` crates. It's not meant for consumption, for app
 * [x] write the table of contents
 
 ### gix-hashtable
-
 * [x] hashmap
 * [x] hashset
 
+### gix-utils
+* **filesystem**
+   * [x] probe capabilities
+   * [x] symlink creation and removal
+   * [x] file snapshots
+* [ ] **BString Interner with Arena-Backing and arbitrary value association**
+    - probably based on [`internment`](https://docs.rs/internment/latest/internment/struct.Arena.html#),
+      but needs `bumpalo` support to avoid item allocations/boxing, and avoid internal `Mutex`. (key type is pointer based).
+
+### gix-fs
+* [x] probe capabilities
+* [x] symlink creation and removal
+* [x] file snapshots
+* [x] stack abstraction
 
 ### gix-object
 * *decode (zero-copy)* borrowed objects
     * [x] commit
-      * [ ] parse [trailers](https://git-scm.com/docs/git-interpret-trailers#_description) 
+      * [ ] parse [trailers](https://git-scm.com/docs/git-interpret-trailers#_description)
     * [x] tree
 * encode owned objects
     * [x] commit
@@ -117,6 +217,8 @@ and itself relies on all `git-*` crates. It's not meant for consumption, for app
     * [x] tag
       * [x] [name validation][tagname-validation]
 * [x] transform borrowed to owned objects
+* [x] edit trees efficiently and write changes back
+    - [ ] See if `gix-fs::InternedMap` improves performance.
 * [x] API documentation
     * [ ] Some examples
 
@@ -127,7 +229,6 @@ and itself relies on all `git-*` crates. It's not meant for consumption, for app
         * [x] decode (zero copy)
         * [x] verify checksum
     * [x] simple and fast pack traversal
-        * [ ] [fast pack traversal works with ref-deltas](https://github.com/Byron/gitoxide/blob/8f9a55bb31af32b266d7c53426bc925361a627b2/gix-pack/src/cache/delta/from_offsets.rs#L101-L105)
     * [x] decode
         * [x] full objects
         * [x] deltified objects
@@ -156,7 +257,7 @@ and itself relies on all `git-*` crates. It's not meant for consumption, for app
     * **advanced**
         * [x] Multi-Pack index file (MIDX)
             * [x] read
-            * [x] write 
+            * [x] write
             * [x] verify
         * [ ] 'bitmap' file
         * [ ] [special handling for networked packs](https://github.com/git/git/blob/89b43f80a514aee58b662ad606e6352e03eaeee4/packfile.c#L949:L949)
@@ -192,30 +293,92 @@ and itself relies on all `git-*` crates. It's not meant for consumption, for app
     * [x] safe with cycles and recursive configurations
     * [x] multi-line with comments and quotes
 * **promisor**
-    * It's vague, but these seems to be like index files allowing to fetch objects from a server on demand.
+    * It's vague, but these seem to be like index files allowing to fetch objects from a server on demand.
 * [x] API documentation
     * [ ] Some examples
-    
+
 ### gix-diff
 
 Check out the [performance discussion][gix-diff-performance] as well.
 
 * **tree**
-  * [x] changes needed to obtain _other tree_
-  * [ ] case-insensitive comparisons  
-  * [ ] rename and copy tracking
-  * [ ] readily available caching for 4x+ speedups
-* **patches**    
-  * There are various ways to generate a patch from two blobs.
-  * [ ] any
-* **lines**
-  * [x] Simple line-by-line diffs powered by the `imara-diff` crate.
-* diffing, merging, working with hunks of data
-* find differences between various states, i.e. index, working tree, commit-tree
+    * [x] changes needed to obtain _other tree_
+* **blobs**
+    * **patches**
+        * There are various ways to generate a patch from two blobs.
+        * [ ] text
+        * [ ] binary
+        * [ ] `git-apply` compatibility
+        * [ ] merge hunks that are close enough based on line-setting (`interhunk-lines`)
+        * [ ] white-space related settings
+    * **lines**
+        * [x] Simple line-by-line diffs powered by the `imara-diff` crate.
+* **generic rename tracker to find renames and copies**
+    * [x] find blobs by exact match
+    * [x] find blobs by similarity check
+    * [ ] heuristics to find best candidate
+    * [ ] find by basename to support similarity check
+        - Not having it can lead to issues when files with the same or similar content are part of a move
+          as files can be lost that way.
+    * [x] directory tracking
+        - [x] by identity
+        - [ ] by similarity
+* **blob**
+    * [x] a choice of to-worktree, to-git and to-worktree-if-needed conversions
+    * [x] `textconv` filters
+    * [x] special handling of files beyond the big-file threshold.
+    * [x] detection of binary files by looking at header (first 8k bytes)
+    * [x] caching of diff-able data
+    * [x] prepare invocation of external diff program
+        - [ ] pass meta-info
+* [ ] working with hunks of data
+* [ ] diff-heuristics match Git perfectly
 * [x] API documentation
-  * [ ] Examples
-    
-[gix-diff-performance]: https://github.com/Byron/gitoxide/discussions/74
+    * [ ] Examples
+
+[gix-diff-performance]: https://github.com/GitoxideLabs/gitoxide/discussions/74
+
+### gix-merge
+
+* [x] three-way content-merge analysis of **blobs** with choice of how to resolve conflicts
+    - [x] respect git attributes and drivers.
+    - [ ] choose how to resolve conflicts on the data-structure
+    - [ ] more efficient handling of paths with `merge=binary` attributes (do not load them into memory)
+    - [x] produce a new blob based on data-structure containing possible resolutions
+        - [x] `merge` style
+        - [x] `diff3` style
+        - [x] `zdiff` style
+    - [ ] various newlines-related options during the merge (see https://git-scm.com/docs/git-merge#Documentation/git-merge.txt-ignore-space-change).
+    - [ ] a way to control inter-hunk merging based on proximity (maybe via `gix-diff` feature which could use the same)
+* [x] **tree**-diff-heuristics match Git for its test-cases
+    - [x] a way to generate an index with stages, mostly conforming with Git.
+    - [ ] resolve to be *ours* or the *ancestors* version of the tree.
+    - [ ] submodule merges (*right now they count as conflicts if they differ*)
+    - [ ] assure sparse indices are handled correctly during application - right now we refuse.
+    - [ ] rewrite so that the whole logic can be proven to be correct - it's too insane now and probably has way 
+          more possible states than are tested, despite best attempts.
+* [x] **commits** - with handling of multiple merge bases by recursive merge-base merge
+* [x] API documentation
+    * [ ] Examples
+
+### gix-blame
+
+* [x] commit-annotations for a single file
+    - [ ] progress
+    - [ ] interruptibility
+    - [ ] streaming
+- [ ] support for worktree changes (creates virtual commit on top of `HEAD`) 
+- [ ] shallow-history support
+- [ ] rename tracking (track different paths through history)
+- [ ] commits to ignore
+- [ ] pass all blame-cornercases (from Git)
+* **Performance-Improvements**
+    * Without the following the performance isn't competitive with Git.
+    1. Implement custom graph walk which won't run down parents that don't have the path in question.
+    2. Implement access of trees from commit-graph and fill that information into the traversal info by default.
+    3. commit-graph with bloom filter, used to quickly check if a commit has a path.
+* [x] API documentation
+    * [ ] Examples
 
 ### gix-traverse
 
@@ -225,10 +388,15 @@ Check out the [performance discussion][gix-traverse-performance] as well.
   * [x] nested traversal
 * **commits**
   * [x] ancestor graph traversal similar to `git revlog`
+  * [ ] `commitgraph` support
 * [x] API documentation
     * [ ] Examples
-    
-[gix-traverse-performance]: https://github.com/Byron/gitoxide/discussions/76
+
+[gix-traverse-performance]: https://github.com/GitoxideLabs/gitoxide/discussions/76
+
+### gix-shallow
+
+A utility crate with types and functionality related to shallow-file handling.
 
 ### gix-url
 * As documented here: https://www.git-scm.com/docs/git-clone#_git_urls
@@ -285,7 +453,7 @@ Check out the [performance discussion][gix-traverse-performance] as well.
     * [ ] general purpose `accept(…)` for servers
 * [x] API documentation
     * [ ] Some examples
-    
+
 #### Advanced HTTP transport features
 
 | **feature** | **curl** | **reqwest** |
@@ -301,7 +469,7 @@ Check out the [performance discussion][gix-traverse-performance] as well.
 * **03** -> custom request configuration via fn(request)
 * **04** -> proxy authentication
 * **05** -> [reauthentication after redirect](https://github.com/git/git/blob/eea7033409a0ed713c78437fc76486983d211e25/http.c#L1931)
-    
+
 ### gix-protocol
 * _abstract over protocol versions to allow delegates to deal only with a single way of doing things_
 * [x] **credentials**
@@ -322,20 +490,23 @@ Check out the [performance discussion][gix-traverse-performance] as well.
         * [x] delegate can support for all fetch features, including shallow, deepen, etc.
         * [x] receive parsed shallow refs
 * [ ] push
+* [ ] remote helper protocol and integration
 * [x] API documentation
     * [ ] Some examples
 
 ### gix-attributes
-* [x] parse git-ignore files (aka gix-attributes without the attributes or negation)
-* [x] parse gix-attributes files
-* [ ] create an attributes stack, ideally one that includes 'ignored' status from .gitignore files.
-   * [ ] support for built-in `binary` macro for `-text -diff -merge`
-    
+* [x] parse `.gitattribute` files
+* [ ] an attributes stack for matching paths to their attributes, with support for built-in `binary` macro for `-text -diff -merge`
+
+### gix-ignore
+* [x] parse `.gitignore` files
+* [x] an attributes stack for checking if paths are excluded
+
 ### gix-quote
 * **ansi-c**
   * [x] quote
   * [ ] unquote
-   
+
 ### gix-mailmap
 * [x] parsing
 * [x] lookup and mapping of author names
@@ -350,8 +521,11 @@ Check out the [performance discussion][gix-traverse-performance] as well.
     * [ ] check for match
 
 ### gix-pathspec
-* [x] parse
-* [ ] matching of paths
+* [x] parse single
+* [ ] parse file line by line (with or without quoting, NUL and LF/CRLF line separation) (see `--pathspec-from-file` and `--pathspec-file-nul`)
+* [x] matching of paths with git-attributes support
+* [ ] programmatic creation of pathspecs
+* [ ] `TryIntoPathspec` trait to parse strings or accept ready-made pathspecs as well, for use in APIs
 
 ### gix-refspec
 * [x] parse
@@ -377,10 +551,16 @@ A mechanism to associate metadata with any object, and keep revisions of it usin
 
 * [ ] CRUD for git notes
 
+### gix-negotiate
+* **algorithms**
+  - [x] `noop`
+  - [x] `consecutive`
+  - [x] `skipping`
+
 ### gix-fetchhead
 * [ ] parse `FETCH_HEAD` information back entirely
 * [ ] write typical fetch-head lines
- 
+
 ### gix-discover
 
 * [x] check if a git directory is a git repository
@@ -394,7 +574,7 @@ A mechanism to associate metadata with any object, and keep revisions of it usin
 ### gix-date
 * [ ] parse git dates
 * [ ] serialize `Time`
- 
+
 ### gix-credentials
 * [x] launch git credentials helpers with a given action
   - [x] built-in `git credential` program
@@ -410,7 +590,7 @@ Provide base-implementations for dealing with smudge and clean filters as well a
 * [ ] clean filter base
 * [ ] smudge filter base
 * [ ] filter process base
- 
+
 ### gix-sec
 
 Provides a trust model to share across gitoxide crates. It helps configuring how to interact with external processes, among other things.
@@ -436,36 +616,55 @@ Make it the best-performing implementation and the most convenient one.
 * [x] parse pattern
 * [x] a type for pattern matching of paths and non-paths, optionally case-insensitively.
 
-### gix-worktree
+### gix-status
+* [x] differences between index and worktree to turn index into worktree
+    - [x] rename tracking
+    - [x] untracked files
+    - [ ] support for fs-monitor for modification checks
+* [ ] differences between index and index to learn what changed
+    - [ ] rename tracking
+
+### gix-worktree-state
 * handle the working **tree/checkout**
-  - [x] checkout an index of files, executables and symlinks just as fast as git
-     - [x] forbid symlinks in directories
-     - [ ] handle submodules
-     - [ ] handle sparse directories
-     - [ ] handle sparse index
-     - [ ] linear scaling with multi-threading up to IO saturation
-  - supported attributes to affect working tree and index contents
-     - [ ] eol
-     - [ ] working-tree-encoding
-     - …more
-  - **filtering** 
-     - [ ] `text`
-     - [ ] `ident`
-     - [ ] filter processes
-     - [ ] single-invocation clean/smudge filters
-* [x] access to all .gitignore/exclude information 
-* [ ] access to all attributes information
- 
+    - [x] checkout an index of files, executables and symlinks just as fast as git
+        - [x] forbid symlinks in directories
+        - [ ] handle submodules
+        - [ ] handle sparse directories
+        - [ ] handle sparse index
+        - [x] linear scaling with multi-threading up to IO saturation
+    - supported attributes to affect working tree and index contents
+        - [x] eol
+        - [x] working-tree-encoding
+        - …more
+    - **filtering**
+        - [x] `text`
+        - [x] `ident`
+        - [x] filter processes
+        - [x] single-invocation clean/smudge filters
+* access to per-path information, like `.gitignore` and `.gitattributes` in a manner well suited for efficient lookups
+    * [x] _exclude_ information
+    * [x] attributes
+
+### gix-worktree
+* [x] A stack to to efficiently generate attribute lists for matching paths against.
+
 ### gix-revision
 * [x] `describe()` (similar to `git name-rev`)
-* parse specifications 
+* [x] merge-base
+* [x] merge-base octopus
+* parse specifications
     * [x] parsing and navigation
     * [x] revision ranges
     * [ ] full date parsing support (depends on `gix-date`)
- 
+
+### gix-revision
+* [x] primitives to help with graph traversal, along with commit-graph acceleration.
+
 ### gix-submodule
-* CRUD for submodules
-* try to handle with all the nifty interactions and be a little more comfortable than what git offers, lay a foundation for smarter git submodules.
+* [x] read `.gitmodule` files, access all their fields, and apply overrides
+* [x] check if a submodule is 'active'
+* [ ] CRUD for submodules
+* [ ] try to handle with all the nifty interactions and be a little more comfortable than what git offers, lay a foundation for smarter git submodules.
 
 ### gix-bitmap
 
@@ -477,14 +676,27 @@ A plumbing crate with shared functionality regarding EWAH compressed bitmaps, as
   * [x] decode on-disk representation
   * [ ] encode on-disk representation
 
+### gix-dir
+
+A git directory walk.
+
+* [x] list untracked files
+* [x] list ignored files
+* [x] collapsing of untracked and ignored directories
+* [x] pathspec based filtering
+* [ ] multi-threaded initialization of icase hash table is always used to accelerate index lookups, even if ignoreCase = false for performance
+* [ ] special handling of submodules (for now, submodules or nested repositories are detected, but they can't be walked into naturally)
+* [ ] accelerated walk with `untracked`-cache (as provided by `UNTR` extension of `gix_index::File`)
+
 ### gix-index
 
 The git staging area.
 
-* read 
+* read
   * [x] V2 - the default, including long-paths support
   * [x] V3 - extended flags
   * [x] V4 - delta-compression for paths
+  * [ ] TODO(perf): multi-threaded implementation should boost performance, spends most time in storing paths, has barely any benefit right now.
   * optional threading
     * [x] concurrent loading of index extensions
     * [x] threaded entry reading
@@ -498,23 +710,26 @@ The git staging area.
     * [x] 'link' base indices to take information from, split index
     * [x] 'sdir' [sparse directory entries](https://github.blog/2021-08-16-highlights-from-git-2-33/) - marker
   * [x] verification of entries and extensions as well as checksum
+  * [ ] expand sparse directory entries using information of the tree itself
 * write
   * [x] V2
   * [x] V3 - extension bits
   * [ ] V4
   * extensions
-      * [x] TREE 
-      * [ ] REUC 
+      * [x] TREE
+      * [ ] REUC
       * [ ] UNTR
       * [ ] FSMN
-      * [x] EOIE 
+      * [x] EOIE
       * [x] 'sdir'
       * [ ] 'link'
           - **note** that we currently **dissolve** any shared index we read so when writing this extension is removed.
 * `stat` update
     * [ ] optional threaded `stat` based on thread_cost (aka preload)
 * [x] handling of `.gitignore` and system file exclude configuration
-* [ ] handle potential races
+* [x] lookups that ignore the case
+    * [ ] multi-threaded lookup table generation with the same algorithm as the one used by Git
+    * [ ] expand sparse folders (don't know how this relates to traversals right now)
 * maintain extensions when altering the cache
     * [ ] TREE for speeding up tree generation
     * [ ] REUC resolving undo
@@ -524,7 +739,7 @@ The git staging area.
     * [ ] IEOT index entry offset table
     * [ ] 'link' base indices to take information from, split index
     * [ ] 'sdir' sparse directory entries
-* add and remove entries
+* [ ] add and remove entries
 * [x] API documentation
     * [ ] Some examples
 
@@ -532,22 +747,23 @@ The git staging area.
 
 * [x] read-only access
     * [x] Graph lookup of commit information to obtain timestamps, generation and parents, and extra edges
+    * [ ] [Corrected generation dates](https://github.com/git/git/commit/e8b63005c48696a26f976f5f9b0ccaf1983e439d)
     * [ ] Bloom filter index
     * [ ] Bloom filter data
 * [ ] create and update graphs and graph files
 * [x] API documentation
     * [ ] Some examples
-    
+
 ### gix-tempfile
 
-See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-tempfile/README.md).
+See its [README.md](https://github.com/GitoxideLabs/gitoxide/blob/main/gix-tempfile/README.md).
 
 ### gix-lock
 
-See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.md).
+See its [README.md](https://github.com/GitoxideLabs/gitoxide/blob/main/gix-lock/README.md).
 
 ### gix-config-value
-* **parse** 
+* **parse**
     * [x] boolean
     * [x] integer
     * [x] color
@@ -555,14 +771,14 @@ See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.
     * [x] path (incl. resolution)
     * [ ] date
     * [ ] [permission][https://github.com/git/git/blob/71a8fab31b70c417e8f5b5f716581f89955a7082/setup.c#L1526:L1526]
-    
+
 ### gix-config
 * [x] read
     * zero-copy parsing with event emission
-    * all config values as per the `gix-config-value` crate  
+    * all config values as per the `gix-config-value` crate
     * **includeIf**
       * [x] `gitdir`,  `gitdir/i`, and `onbranch`
-      * [ ] `hasconfig`
+      * [x] `hasconfig:remote.*.url`
 * [x] access values and sections by name and sub-section
 * [x] edit configuration in memory, non-destructively
     * cross-platform newline handling
@@ -575,122 +791,27 @@ See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.
 * [x] API documentation
     * [x] Some examples
 
-### gix
-* [x] utilities for applications to make long running operations interruptible gracefully and to support timeouts in servers.
-* [ ] handle `core.repositoryFormatVersion` and extensions
-* [x] support for unicode-precomposition of command-line arguments (needs explicit use in parent application)
-* **Repository**  
-    * [x] discovery
-        * [x] option to not cross file systems (default)
-        * [x] handle git-common-dir
-        * [x] support for `GIT_CEILING_DIRECTORIES` environment variable
-        * [ ] handle other non-discovery modes and provide control over environment variable usage required in applications
-    * [x] rev-parse
-    * [x] rev-walk
-      * [x] include tips
-      * [ ] exclude commits
-    * [x] instantiation
-    * [x] access to refs and objects
-    * **credentials**
-      * [x] run `git credential` directly
-      * [x] use credential helper configuration and to obtain credentials with `gix_credentials::helper::Cascade`
-    * **config**
-      * [ ] facilities to apply the [url-match](https://git-scm.com/docs/gix-config#Documentation/gix-config.txt-httplturlgt) algorithm and to
-            [normalize urls](https://github.com/git/git/blob/be1a02a17ede4082a86dfbfee0f54f345e8b43ac/urlmatch.c#L109:L109) before comparison.
-    * **traverse** 
-      * [x] commit graphs
-      * [ ] make [git-notes](https://git-scm.com/docs/git-notes) accessible
-      * [x] tree entries
-    * **diffs/changes**
-        * [x] tree with other tree
-           * [ ] respect case-sensitivity of host filesystem.
-           * [x] a way to access various diff related settings or use them
-           * **rewrite tracking**
-              * **deviation** - git keeps up to four candidates whereas we use the first-found candidate that matches the similarity percentage.
-                                This can lead to different sources being found. As such, we also don't consider the filename at all.
-              * [ ] handle binary files correctly, and apply filters for that matter
-              * [x] computation limit with observable reduction of precision when it is hit, for copies and renames separately
-              * **by identity** 
-                 * [x] renames (sym-links are only ever compared by identity)
-                 * [x] copies
-              * **by similarity** - similarity factor controllable separately from renames
-                 * [x] renames
-                 * [x] copies
-              * [x] 'find-copies-harder' - find copies with the source being the entire tree.
-        * [ ] tree with working tree
-        * [x] diffs between modified blobs with various algorithms
-        * [ ] tree with index
-    * [x] initialize
-        * [x] Proper configuration depending on platform (e.g. ignorecase, filemode, …)
-    * **Id**
-        * [x] short hashes with detection of ambiguity.
-    * **Commit**
-        * [x] `describe()` like functionality
-        * [x] create new commit from tree
-    * **Objects**
-        * [x] lookup
-        * [x] peel to object kind
-        * [ ] create [signed commits and tags](https://github.com/Byron/gitoxide/issues/12)
-      * **trees**
-        * [x] lookup path
-    * **references**
-        * [x] peel to end
-        * [x] ref-log access
-        * [x] remote name
-        * [x] find remote itself
-            - [ ] respect `branch.<name>.merge` in the returned remote.
-    * **remotes**  
-        * [ ] clone 
-          * [ ] shallow
-          * [ ] [bundles](https://git-scm.com/docs/git-bundle)
-        * [x] fetch
-        * [ ] push
-        * [x] ls-refs
-        * [x] ls-refs with ref-spec filter
-        * [x] list, find by name
-        * [x] create in memory
-        * [ ] groups
-        * [ ] [remote and branch files](https://github.com/git/git/blob/master/remote.c#L300)
-  * [ ] execute hooks
-    * **refs**
-        * [ ] run transaction hooks and handle special repository states like quarantine
-        * [ ] support for different backends like `files` and `reftable`
-    * **main or linked worktree**
-        * [ ] add files with `.gitignore` handling
-        * [ ] checkout with conversions like clean + smudge as in `.gitattributes`
-        * [ ] _diff_ index with working tree
-        * [ ] sparse checkout support
-        * [ ] read per-worktree config if `extensions.worktreeConfig` is enabled.
-        * **index**
-            * [ ] tree from index
-            * [ ] index from tree
-    * **worktrees**
-       * [x] open a repository with worktrees
-          * [x] read locked state
-          * [ ] obtain 'prunable' information
-       * [x] proper handling of worktree related refs
-       * [ ] create, move, remove, and repair
-       * [x] respect `core.worktree` configuration
-          - **deviation**
-             * The delicate interplay between `GIT_COMMON_DIR` and `GIT_WORK_TREE` isn't implemented.
-    * **config**
-       * [x] read the primitive types `boolean`, `integer`, `string`
-       * [x] read and interpolate trusted paths
-       * [x] low-level API for more elaborate access to all details of `gix-config` files
-       * [ ] a way to make changes to individual configuration files
-    * [x] mailmap   
-    * [x] object replacements (`git replace`)
-    * [ ] configuration
-    * [ ] merging
-    * [ ] stashing
-    * [ ] Use _Commit Graph_ to speed up certain queries
-    * [ ] subtree
-    * [ ] interactive rebase status/manipulation
-    * submodules
+### gix-worktree-stream
+
+* [x] encode git-tree as stream of bytes (with large file support and actual streaming)
+* [x] produce a stream of entries
+* [x] add custom entries to the stream
+* [x] respect `export-ignore` git attribute
+* [x] apply standard worktree conversion to simulate an actual checkout
+* [ ] support for submodule inclusion
+* [x] API documentation
+    * [ ] Some examples
+
+### gix-archive
+
+* [x] `write_to()` for creating an archive with various container formats
+    * [x] `tar` and `tar.gz`
+    * [x] `zip`
+* [x] add prefix and modification date
 * [ ] API documentation
     * [ ] Some examples
 
-### git-bundle
+### gix-bundle
 * [ ] create a bundle from an archive
    * [ ] respect `export-ignore` and `export-subst`
 * [ ] extract a branch from a bundle into a repository
@@ -699,7 +820,25 @@ See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.
 
 ### gix-validate
 * [x] validate ref names
+* [x] validate submodule names
 * [x] [validate][tagname-validation] tag names
+
+### gix-fsck
+* [x] validate connectivity and find missing objects starting from…
+    - [x] commits
+    - [ ] tags
+    - [ ] tree-cache in the `index` or any entry within
+* [ ] validate object hashes during connectivity traversal
+* [ ] progress reporting and interruptability
+* [ ] skipList to exclude objects which are known to be broken
+* [ ] validate blob hashes (connectivity check
+* [ ] identify objects that exist but are not reachable (i.e. what remains after a full graph traversal from all valid starting points)
+* [ ] write dangling objects to the `.git/log-found` directory structure
+* [ ] `strict` mode, to check for tree objects with `g+w` permissions
+* [ ] consider reflog entries from `ref` starting points
+* [ ] when reporting reachable objects, provide the path through which they are reachable, i.e. ref-log@{3} -> commit -> tree -> path-in-tree
+* [ ] limit search to ODB without alternates (default is equivalent to `git fsck --full` due to ODB implementation)
+* [ ] all individual [checks available in `git fsck`](https://git-scm.com/docs/git-fsck#_fsck_messages) (*too many to print here*)
 
 ### gix-ref
 * [ ] Prepare code for arrival of longer hashes like Sha256. It's part of the [V2 proposal][reftable-v2] but should work for loose refs as well.
@@ -718,7 +857,7 @@ See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.
         * [x] avoid packing refs which are worktree private
     * ~~symbolic ref support, using symbolic links~~
         * This is a legacy feature which is not in use anymore.
-    * **transactions** 
+    * **transactions**
       * [x] delete, create or update single ref or multiple refs while handling the _reflog_
       * [x] set any valid ref value (not just object ids)
       * [x] reflog changes can be entirely disabled (i.e. for bare repos)
@@ -736,7 +875,7 @@ See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.
       * [x] find single ref by name
       * [x] iterate refs with optional prefix
       * [x] handle unsorted packed refs and those without a header
-  * [ ] **[reftable][reftable-spec]**, 
+  * [ ] **[reftable][reftable-spec]**,
     * see [here for a Go/C implementation][reftable-impl]
 * [x] API documentation
     * [ ] Some examples
@@ -762,7 +901,7 @@ See its [README.md](https://github.com/Byron/gitoxide/blob/main/gix-lock/README.
 ### gix-tui
 * _a terminal user interface seeking to replace and improve on `tig`_
 * Can display complex history in novel ways to make them graspable. Maybe [this post] can be an inspiration.
- 
+
 ### gix-tix
 
 A re-implementation of a minimal `tig` like UI that aims to be fast and to the point.
@@ -771,7 +910,7 @@ A re-implementation of a minimal `tig` like UI that aims to be fast and to the p
 
 Definitely optimize for performance and see how we fare compared to [oxen](https://github.com/Oxen-AI/oxen-release/blob/main/Performance.md).
 Right now, `git lfs` is 40x slower, due to sequential uploads and lack of fast compression. It seems this can be greatly improved to get
-close to 6min for 200k images (1.4GB). GitHub seems to cap upload speeds to 100kb/s, one major reason it's so slow, and it can only do 
+close to 6min for 200k images (1.4GB). GitHub seems to cap upload speeds to 100kb/s, one major reason it's so slow, and it can only do
 it sequentially as `git-lfs` doesn't use the new `filter-process` protocol which would allow parallelization.
 Oxen uses the XXH3 (30gb/s) which greatly outperforms SHA1 - however, it doesn't look like the hash is necessarily the bottleneck in typical benchmarks.
 

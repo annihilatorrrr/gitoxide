@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gix_features::{parallel, progress::Progress};
+use gix_features::{parallel, progress::DynNestedProgress};
 
 use super::Error;
 use crate::{
@@ -56,34 +56,30 @@ impl index::File {
     /// at the cost of memory.
     ///
     /// For more details, see the documentation on the [`traverse()`][index::File::traverse()] method.
-    pub fn traverse_with_index<P, Processor, E>(
+    pub fn traverse_with_index<Processor, E>(
         &self,
         pack: &crate::data::File,
-        new_processor: impl Fn() -> Processor + Send + Clone,
-        mut progress: P,
+        mut processor: Processor,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
         Options { check, thread_limit }: Options,
-    ) -> Result<Outcome<P>, Error<E>>
+    ) -> Result<Outcome, Error<E>>
     where
-        P: Progress,
-        Processor: FnMut(
-            gix_object::Kind,
-            &[u8],
-            &index::Entry,
-            &mut <P::SubProgress as Progress>::SubProgress,
-        ) -> Result<(), E>,
+        Processor: FnMut(gix_object::Kind, &[u8], &index::Entry, &dyn gix_features::progress::Progress) -> Result<(), E>
+            + Send
+            + Clone,
         E: std::error::Error + Send + Sync + 'static,
     {
         let (verify_result, traversal_result) = parallel::join(
             {
-                let pack_progress = progress.add_child_with_id(
+                let mut pack_progress = progress.add_child_with_id(
                     format!(
                         "Hash of pack '{}'",
                         pack.path().file_name().expect("pack has filename").to_string_lossy()
                     ),
                     ProgressId::HashPackDataBytes.into(),
                 );
-                let index_progress = progress.add_child_with_id(
+                let mut index_progress = progress.add_child_with_id(
                     format!(
                         "Hash of index '{}'",
                         self.path.file_name().expect("index has filename").to_string_lossy()
@@ -91,7 +87,8 @@ impl index::File {
                     ProgressId::HashPackIndexBytes.into(),
                 );
                 move || {
-                    let res = self.possibly_verify(pack, check, pack_progress, index_progress, should_interrupt);
+                    let res =
+                        self.possibly_verify(pack, check, &mut pack_progress, &mut index_progress, should_interrupt);
                     if res.is_err() {
                         should_interrupt.store(true, Ordering::SeqCst);
                     }
@@ -101,41 +98,42 @@ impl index::File {
             || -> Result<_, Error<_>> {
                 let sorted_entries = index_entries_sorted_by_offset_ascending(
                     self,
-                    progress.add_child_with_id("collecting sorted index", ProgressId::CollectSortedIndexEntries.into()),
+                    &mut progress.add_child_with_id(
+                        "collecting sorted index".into(),
+                        ProgressId::CollectSortedIndexEntries.into(),
+                    ),
                 ); /* Pack Traverse Collect sorted Entries */
                 let tree = crate::cache::delta::Tree::from_offsets_in_pack(
                     pack.path(),
                     sorted_entries.into_iter().map(Entry::from),
-                    |e| e.index_entry.pack_offset,
-                    |id| self.lookup(id).map(|idx| self.pack_offset_at_index(idx)),
-                    progress.add_child_with_id("indexing", ProgressId::TreeFromOffsetsObjects.into()),
+                    &|e| e.index_entry.pack_offset,
+                    &|id| self.lookup(id).map(|idx| self.pack_offset_at_index(idx)),
+                    &mut progress.add_child_with_id("indexing".into(), ProgressId::TreeFromOffsetsObjects.into()),
                     should_interrupt,
                     self.object_hash,
                 )?;
                 let mut outcome = digest_statistics(tree.traverse(
-                    |slice, out| pack.entry_slice(slice).map(|entry| out.copy_from_slice(entry)),
+                    |slice, pack| pack.entry_slice(slice),
+                    pack,
                     pack.pack_end() as u64,
-                    new_processor,
-                    |data,
-                     progress,
-                     traverse::Context {
-                         entry: pack_entry,
-                         entry_end,
-                         decompressed: bytes,
-                         state: ref mut processor,
-                         level,
-                     }| {
+                    move |data,
+                          progress,
+                          traverse::Context {
+                              entry: pack_entry,
+                              entry_end,
+                              decompressed: bytes,
+                              level,
+                          }| {
                         let object_kind = pack_entry.header.as_kind().expect("non-delta object");
                         data.level = level;
                         data.decompressed_size = pack_entry.decompressed_size;
                         data.object_kind = object_kind;
                         data.compressed_size = entry_end - pack_entry.data_offset;
                         data.object_size = bytes.len() as u64;
-                        let result = crate::index::traverse::process_entry(
+                        let result = index::traverse::process_entry(
                             check,
                             object_kind,
                             bytes,
-                            progress,
                             &data.index_entry,
                             || {
                                 // TODO: Fix this - we overwrite the header of 'data' which also changes the computed entry size,
@@ -146,7 +144,8 @@ impl index::File {
                                         .expect("slice pointing into the pack (by now data is verified)"),
                                 )
                             },
-                            processor,
+                            progress,
+                            &mut processor,
                         );
                         match result {
                             Err(err @ Error::PackDecode { .. }) if !check.fatal_decode_error() => {
@@ -156,9 +155,12 @@ impl index::File {
                             res => res,
                         }
                     },
-                    crate::cache::delta::traverse::Options {
-                        object_progress: progress.add_child_with_id("Resolving", ProgressId::DecodedObjects.into()),
-                        size_progress: progress.add_child_with_id("Decoding", ProgressId::DecodedBytes.into()),
+                    traverse::Options {
+                        object_progress: Box::new(
+                            progress.add_child_with_id("Resolving".into(), ProgressId::DecodedObjects.into()),
+                        ),
+                        size_progress:
+                            &mut progress.add_child_with_id("Decoding".into(), ProgressId::DecodedBytes.into()),
                         thread_limit,
                         should_interrupt,
                         object_hash: self.object_hash,
@@ -171,7 +173,6 @@ impl index::File {
         Ok(Outcome {
             actual_index_checksum: verify_result?,
             statistics: traversal_result?,
-            progress,
         })
     }
 }
@@ -205,12 +206,14 @@ fn digest_statistics(traverse::Outcome { roots, children }: traverse::Outcome<En
         res.total_compressed_entries_size += item.data.compressed_size;
         res.total_decompressed_entries_size += item.data.decompressed_size;
         res.total_object_size += item.data.object_size;
-        *res.objects_per_chain_length.entry(item.data.level as u32).or_insert(0) += 1;
+        *res.objects_per_chain_length
+            .entry(u32::from(item.data.level))
+            .or_insert(0) += 1;
 
         average.decompressed_size += item.data.decompressed_size;
         average.compressed_size += item.data.compressed_size as usize;
         average.object_size += item.data.object_size;
-        average.num_deltas += item.data.level as u32;
+        average.num_deltas += u32::from(item.data.level);
         use gix_object::Kind::*;
         match item.data.object_kind {
             Blob => res.num_blobs += 1,

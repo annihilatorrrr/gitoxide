@@ -1,7 +1,6 @@
 use bstr::{BStr, BString, ByteSlice};
 
-use crate::file::Section;
-use crate::{parse::Event, File};
+use crate::{file::Section, parse::Event, File};
 
 impl File<'_> {
     /// Serialize this type into a `BString` for convenience.
@@ -18,7 +17,7 @@ impl File<'_> {
     /// as it was parsed, while writing only sections for which `filter` returns true.
     pub fn write_to_filter(
         &self,
-        mut out: impl std::io::Write,
+        mut out: &mut dyn std::io::Write,
         mut filter: impl FnMut(&Section<'_>) -> bool,
     ) -> std::io::Result<()> {
         let nl = self.detect_newline_style();
@@ -66,7 +65,7 @@ impl File<'_> {
 
     /// Stream ourselves to the given `out`, in order to reproduce this file mostly losslessly
     /// as it was parsed.
-    pub fn write_to(&self, out: impl std::io::Write) -> std::io::Result<()> {
+    pub fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
         self.write_to_filter(out, |_| true)
     }
 }
@@ -77,16 +76,25 @@ pub(crate) fn ends_with_newline(e: &[crate::parse::Event<'_>], nl: impl AsRef<[u
     }
     e.iter()
         .rev()
-        .take_while(|e| e.to_bstr_lossy().iter().all(|b| b.is_ascii_whitespace()))
+        .take_while(|e| e.to_bstr_lossy().iter().all(u8::is_ascii_whitespace))
         .find_map(|e| e.to_bstr_lossy().contains_str(nl.as_ref()).then_some(true))
         .unwrap_or(false)
 }
 
 pub(crate) fn extract_newline<'a>(e: &'a Event<'_>) -> Option<&'a BStr> {
-    match e {
-        Event::Newline(b) => b.as_ref().into(),
-        _ => None,
-    }
+    Some(match e {
+        Event::Newline(b) => {
+            let nl = b.as_ref();
+
+            // Newlines are parsed consecutively, be sure we only take the smallest possible variant
+            if nl.contains(&b'\r') {
+                "\r\n".into()
+            } else {
+                "\n".into()
+            }
+        }
+        _ => return None,
+    })
 }
 
 pub(crate) fn platform_newline() -> &'static BStr {

@@ -1,5 +1,5 @@
 use filetime::FileTime;
-use gix_index::{entry, extension, verify::extensions::no_find, write, write::Options, State, Version};
+use gix_index::{entry, extension, write, write::Options, State, Version};
 
 use crate::index::Fixture::*;
 
@@ -34,6 +34,47 @@ fn roundtrips() -> crate::Result {
         compare_states_against_baseline(&actual, actual_version, &expected, options, name);
         compare_raw_bytes(&out_bytes, &expected_bytes, name);
     }
+    Ok(())
+}
+
+#[test]
+fn skip_hash() -> crate::Result {
+    let tmp = gix_testtools::tempfile::TempDir::new()?;
+    let path = tmp.path().join("index");
+    let mut expected = Loose("conflicting-file").open();
+    assert!(expected.checksum().is_some());
+
+    expected.set_path(&path);
+    expected.write(Options {
+        extensions: Default::default(),
+        skip_hash: false,
+    })?;
+
+    let actual = gix_index::File::at(
+        &path,
+        expected.checksum().expect("present").kind(),
+        false,
+        Default::default(),
+    )?;
+    assert_eq!(
+        actual.checksum(),
+        expected.checksum(),
+        "a hash is written by default and it matches"
+    );
+
+    expected.write(Options {
+        extensions: Default::default(),
+        skip_hash: true,
+    })?;
+
+    let actual = gix_index::File::at(
+        &path,
+        expected.checksum().expect("present").kind(),
+        false,
+        Default::default(),
+    )?;
+    assert_eq!(actual.checksum(), None, "no hash is produced in this case");
+
     Ok(())
 }
 
@@ -96,6 +137,7 @@ fn state_comparisons_with_various_extension_configurations() {
         //       the fixture artificially sets the version to V4 and gitoxide writes it back out as the lowest required version, V2
         // Generated("v4_more_files_IEOT"),
         Generated("v3_skip_worktree"),
+        Generated("v3_added_files"),
         Generated("v3_sparse_index_non_cone"),
         Generated("v3_sparse_index"),
         // TODO: this fails because git writes the sdir extension in this case while gitoxide doesn't
@@ -180,20 +222,18 @@ fn compare_states_against_baseline(
     assert_eq!(
         actual.tree(),
         expected.tree(),
-        "tree extension mismatch, actual vs expected in {:?}",
-        fixture
+        "tree extension mismatch, actual vs expected in {fixture:?}"
     );
 }
 
 fn compare_states(actual: &State, actual_version: Version, expected: &State, options: Options, fixture: &str) {
     actual.verify_entries().expect("valid");
-    actual.verify_extensions(false, no_find).expect("valid");
+    actual.verify_extensions(false, gix_object::find::Never).expect("valid");
 
     assert_eq!(
         actual.version(),
         actual_version,
-        "version mismatch, read vs written, in {:?}",
-        fixture
+        "version mismatch, read vs written, in {fixture:?}"
     );
     assert_eq!(
         actual.tree(),
@@ -201,8 +241,7 @@ fn compare_states(actual: &State, actual_version: Version, expected: &State, opt
             .extensions
             .should_write(extension::tree::SIGNATURE)
             .and_then(|_| expected.tree()),
-        "tree extension mismatch, actual vs option in {:?}",
-        fixture
+        "tree extension mismatch, actual vs option in {fixture:?}"
     );
 
     // As `write_to` does / should not mutate we can test those properties here.
@@ -210,37 +249,28 @@ fn compare_states(actual: &State, actual_version: Version, expected: &State, opt
     assert_eq!(
         actual.version(),
         expected.version(),
-        "version mismatch, actual vs expected, in {:?}",
-        fixture
+        "version mismatch, actual vs expected, in {fixture:?}"
     );
     assert_eq!(
         actual.is_sparse(),
         expected.is_sparse(),
-        "sparse index entries extension mismatch in {:?}",
-        fixture
+        "sparse index entries extension mismatch in {fixture:?}"
     );
     assert_eq!(
         actual.entries().len(),
         expected.entries().len(),
-        "entry count mismatch in {:?}",
-        fixture
+        "entry count mismatch in {fixture:?}",
     );
-    assert_eq!(
-        actual.entries(),
-        expected.entries(),
-        "entries mismatch in {:?}",
-        fixture
-    );
+    assert_eq!(actual.entries(), expected.entries(), "entries mismatch in {fixture:?}",);
     assert_eq!(
         actual.path_backing(),
         expected.path_backing(),
-        "path_backing mismatch in {:?}",
-        fixture
+        "path_backing mismatch in {fixture:?}",
     );
 }
 
 fn compare_raw_bytes(generated: &[u8], expected: &[u8], fixture: &str) {
-    assert_eq!(generated.len(), expected.len(), "file length mismatch in {:?}", fixture);
+    assert_eq!(generated.len(), expected.len(), "file length mismatch in {fixture:?}");
 
     let print_range = 10;
     for (index, (a, b)) in generated.iter().zip(expected.iter()).enumerate() {
@@ -264,9 +294,13 @@ fn only_tree_ext() -> Options {
             end_of_index_entry: false,
             tree_cache: true,
         },
+        skip_hash: false,
     }
 }
 
 fn options_with(extensions: write::Extensions) -> Options {
-    Options { extensions }
+    Options {
+        extensions,
+        skip_hash: false,
+    }
 }

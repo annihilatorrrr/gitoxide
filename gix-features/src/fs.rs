@@ -21,76 +21,331 @@ mod shared {
     }
 }
 
+#[cfg(any(feature = "walkdir", feature = "fs-walkdir-parallel", feature = "fs-read-dir"))]
+mod walkdir_precompose {
+    use std::borrow::Cow;
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    #[derive(Debug)]
+    pub struct DirEntry<T: std::fmt::Debug> {
+        inner: T,
+        precompose_unicode: bool,
+    }
+
+    impl<T: std::fmt::Debug> DirEntry<T> {
+        /// Create a new instance.
+        pub fn new(inner: T, precompose_unicode: bool) -> Self {
+            Self {
+                inner,
+                precompose_unicode,
+            }
+        }
+    }
+
+    pub trait DirEntryApi {
+        fn path(&self) -> Cow<'_, Path>;
+        fn file_name(&self) -> Cow<'_, OsStr>;
+        fn file_type(&self) -> std::io::Result<std::fs::FileType>;
+    }
+
+    impl<T: DirEntryApi + std::fmt::Debug> DirEntry<T> {
+        /// Obtain the full path of this entry, possibly with precomposed unicode if enabled.
+        ///
+        /// Note that decomposing filesystem like those made by Apple accept both precomposed and
+        /// decomposed names, and consider them equal.
+        pub fn path(&self) -> Cow<'_, Path> {
+            let path = self.inner.path();
+            if self.precompose_unicode {
+                gix_utils::str::precompose_path(path)
+            } else {
+                path
+            }
+        }
+
+        /// Obtain filen name of this entry, possibly with precomposed unicode if enabled.
+        pub fn file_name(&self) -> Cow<'_, OsStr> {
+            let name = self.inner.file_name();
+            if self.precompose_unicode {
+                gix_utils::str::precompose_os_string(name)
+            } else {
+                name
+            }
+        }
+
+        /// Return the file type for the file that this entry points to.
+        ///
+        /// If `follow_links` was `true`, this is the file type of the item the link points to.
+        pub fn file_type(&self) -> std::io::Result<std::fs::FileType> {
+            self.inner.file_type()
+        }
+    }
+
+    /// A platform over entries in a directory, which may or may not precompose unicode after retrieving
+    /// paths from the file system.
+    #[cfg(any(feature = "walkdir", feature = "fs-walkdir-parallel"))]
+    pub struct WalkDir<T> {
+        pub(crate) inner: Option<T>,
+        pub(crate) precompose_unicode: bool,
+    }
+
+    #[cfg(any(feature = "walkdir", feature = "fs-walkdir-parallel"))]
+    pub struct WalkDirIter<T, I, E>
+    where
+        T: Iterator<Item = Result<I, E>>,
+        I: DirEntryApi,
+    {
+        pub(crate) inner: T,
+        pub(crate) precompose_unicode: bool,
+    }
+
+    #[cfg(any(feature = "walkdir", feature = "fs-walkdir-parallel"))]
+    impl<T, I, E> Iterator for WalkDirIter<T, I, E>
+    where
+        T: Iterator<Item = Result<I, E>>,
+        I: DirEntryApi + std::fmt::Debug,
+    {
+        type Item = Result<DirEntry<I>, E>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner
+                .next()
+                .map(|res| res.map(|entry| DirEntry::new(entry, self.precompose_unicode)))
+        }
+    }
+}
+
+///
+#[cfg(feature = "fs-read-dir")]
+pub mod read_dir {
+    use std::borrow::Cow;
+    use std::ffi::OsStr;
+    use std::fs::FileType;
+    use std::path::Path;
+
+    /// A directory entry adding precompose-unicode support to [`std::fs::DirEntry`].
+    pub type DirEntry = super::walkdir_precompose::DirEntry<std::fs::DirEntry>;
+
+    impl super::walkdir_precompose::DirEntryApi for std::fs::DirEntry {
+        fn path(&self) -> Cow<'_, Path> {
+            self.path().into()
+        }
+
+        fn file_name(&self) -> Cow<'_, OsStr> {
+            self.file_name().into()
+        }
+
+        fn file_type(&self) -> std::io::Result<FileType> {
+            self.file_type()
+        }
+    }
+}
+
 ///
 #[cfg(feature = "fs-walkdir-parallel")]
 pub mod walkdir {
+    use std::borrow::Cow;
+    use std::ffi::OsStr;
+    use std::fs::FileType;
     use std::path::Path;
 
-    pub use jwalk::{DirEntry as DirEntryGeneric, DirEntryIter as DirEntryIterGeneric, Error, WalkDir};
+    use jwalk::WalkDir as WalkDirImpl;
+    pub use jwalk::{DirEntry as DirEntryGeneric, DirEntryIter as DirEntryIterGeneric, Error};
 
     pub use super::shared::Parallelism;
 
-    /// An alias for an uncustomized directory entry to match the one of the non-parallel version offered by `walkdir`.
-    pub type DirEntry = DirEntryGeneric<((), ())>;
+    type DirEntryImpl = DirEntryGeneric<((), ())>;
+
+    /// A directory entry returned by [DirEntryIter].
+    pub type DirEntry = super::walkdir_precompose::DirEntry<DirEntryImpl>;
+    /// A platform to create a [DirEntryIter] from.
+    pub type WalkDir = super::walkdir_precompose::WalkDir<WalkDirImpl>;
+
+    impl super::walkdir_precompose::DirEntryApi for DirEntryImpl {
+        fn path(&self) -> Cow<'_, Path> {
+            self.path().into()
+        }
+
+        fn file_name(&self) -> Cow<'_, OsStr> {
+            self.file_name().into()
+        }
+
+        fn file_type(&self) -> std::io::Result<FileType> {
+            Ok(self.file_type())
+        }
+    }
+
+    impl IntoIterator for WalkDir {
+        type Item = Result<DirEntry, jwalk::Error>;
+        type IntoIter = DirEntryIter;
+
+        fn into_iter(self) -> Self::IntoIter {
+            DirEntryIter {
+                inner: self.inner.expect("always set (builder fix)").into_iter(),
+                precompose_unicode: self.precompose_unicode,
+            }
+        }
+    }
+
+    impl WalkDir {
+        /// Set the minimum component depth of paths of entries.
+        pub fn min_depth(mut self, min: usize) -> Self {
+            self.inner = Some(self.inner.take().expect("always set").min_depth(min));
+            self
+        }
+        /// Set the maximum component depth of paths of entries.
+        pub fn max_depth(mut self, max: usize) -> Self {
+            self.inner = Some(self.inner.take().expect("always set").max_depth(max));
+            self
+        }
+        /// Follow symbolic links.
+        pub fn follow_links(mut self, toggle: bool) -> Self {
+            self.inner = Some(self.inner.take().expect("always set").follow_links(toggle));
+            self
+        }
+    }
 
     impl From<Parallelism> for jwalk::Parallelism {
         fn from(v: Parallelism) -> Self {
             match v {
                 Parallelism::Serial => jwalk::Parallelism::Serial,
-                Parallelism::ThreadPoolPerTraversal { thread_name } => {
-                    let pool = jwalk::rayon::ThreadPoolBuilder::new()
-                        .num_threads(num_cpus::get().min(16))
-                        .stack_size(128 * 1024)
-                        .thread_name(move |idx| format!("{thread_name} {idx}"))
-                        .build()
-                        .expect("we only set options that can't cause a build failure");
-                    jwalk::Parallelism::RayonExistingPool {
-                        pool: pool.into(),
-                        busy_timeout: None,
-                    }
-                }
+                Parallelism::ThreadPoolPerTraversal { thread_name } => std::thread::available_parallelism()
+                    .map_or_else(
+                        |_| Parallelism::Serial.into(),
+                        |threads| {
+                            let pool = jwalk::rayon::ThreadPoolBuilder::new()
+                                .num_threads(threads.get().min(16))
+                                .stack_size(128 * 1024)
+                                .thread_name(move |idx| format!("{thread_name} {idx}"))
+                                .build()
+                                .expect("we only set options that can't cause a build failure");
+                            jwalk::Parallelism::RayonExistingPool {
+                                pool: pool.into(),
+                                busy_timeout: None,
+                            }
+                        },
+                    ),
             }
         }
     }
 
     /// Instantiate a new directory iterator which will not skip hidden files, with the given level of `parallelism`.
-    pub fn walkdir_new(root: impl AsRef<Path>, parallelism: Parallelism) -> WalkDir {
-        WalkDir::new(root).skip_hidden(false).parallelism(parallelism.into())
+    ///
+    /// Use `precompose_unicode` to represent the `core.precomposeUnicode` configuration option.
+    pub fn walkdir_new(root: &Path, parallelism: Parallelism, precompose_unicode: bool) -> WalkDir {
+        WalkDir {
+            inner: WalkDirImpl::new(root)
+                .skip_hidden(false)
+                .parallelism(parallelism.into())
+                .into(),
+            precompose_unicode,
+        }
     }
 
     /// Instantiate a new directory iterator which will not skip hidden files and is sorted
-    pub fn walkdir_sorted_new(root: impl AsRef<Path>, parallelism: Parallelism) -> WalkDir {
-        WalkDir::new(root)
-            .skip_hidden(false)
-            .sort(true)
-            .parallelism(parallelism.into())
+    ///
+    /// Use `precompose_unicode` to represent the `core.precomposeUnicode` configuration option.
+    pub fn walkdir_sorted_new(root: &Path, parallelism: Parallelism, precompose_unicode: bool) -> WalkDir {
+        WalkDir {
+            inner: WalkDirImpl::new(root)
+                .skip_hidden(false)
+                .sort(true)
+                .parallelism(parallelism.into())
+                .into(),
+            precompose_unicode,
+        }
     }
 
+    type DirEntryIterImpl = DirEntryIterGeneric<((), ())>;
+
     /// The Iterator yielding directory items
-    pub type DirEntryIter = DirEntryIterGeneric<((), ())>;
+    pub type DirEntryIter = super::walkdir_precompose::WalkDirIter<DirEntryIterImpl, DirEntryImpl, jwalk::Error>;
 }
 
-#[cfg(all(feature = "walkdir", not(feature = "fs-walkdir-parallel")))]
 ///
+#[cfg(all(feature = "walkdir", not(feature = "fs-walkdir-parallel")))]
 pub mod walkdir {
+    use std::borrow::Cow;
+    use std::ffi::OsStr;
+    use std::fs::FileType;
     use std::path::Path;
 
-    pub use walkdir::{DirEntry, Error, WalkDir};
+    pub use walkdir::Error;
+    use walkdir::{DirEntry as DirEntryImpl, WalkDir as WalkDirImpl};
+
+    /// A directory entry returned by [DirEntryIter].
+    pub type DirEntry = super::walkdir_precompose::DirEntry<DirEntryImpl>;
+    /// A platform to create a [DirEntryIter] from.
+    pub type WalkDir = super::walkdir_precompose::WalkDir<WalkDirImpl>;
 
     pub use super::shared::Parallelism;
 
+    impl super::walkdir_precompose::DirEntryApi for DirEntryImpl {
+        fn path(&self) -> Cow<'_, Path> {
+            self.path().into()
+        }
+
+        fn file_name(&self) -> Cow<'_, OsStr> {
+            self.file_name().into()
+        }
+
+        fn file_type(&self) -> std::io::Result<FileType> {
+            Ok(self.file_type())
+        }
+    }
+
+    impl IntoIterator for WalkDir {
+        type Item = Result<DirEntry, walkdir::Error>;
+        type IntoIter = DirEntryIter;
+
+        fn into_iter(self) -> Self::IntoIter {
+            DirEntryIter {
+                inner: self.inner.expect("always set (builder fix)").into_iter(),
+                precompose_unicode: self.precompose_unicode,
+            }
+        }
+    }
+
+    impl WalkDir {
+        /// Set the minimum component depth of paths of entries.
+        pub fn min_depth(mut self, min: usize) -> Self {
+            self.inner = Some(self.inner.take().expect("always set").min_depth(min));
+            self
+        }
+        /// Set the maximum component depth of paths of entries.
+        pub fn max_depth(mut self, max: usize) -> Self {
+            self.inner = Some(self.inner.take().expect("always set").max_depth(max));
+            self
+        }
+        /// Follow symbolic links.
+        pub fn follow_links(mut self, toggle: bool) -> Self {
+            self.inner = Some(self.inner.take().expect("always set").follow_links(toggle));
+            self
+        }
+    }
+
     /// Instantiate a new directory iterator which will not skip hidden files, with the given level of `parallelism`.
-    pub fn walkdir_new(root: impl AsRef<Path>, _: Parallelism) -> WalkDir {
-        WalkDir::new(root)
+    ///
+    /// Use `precompose_unicode` to represent the `core.precomposeUnicode` configuration option.
+    pub fn walkdir_new(root: &Path, _: Parallelism, precompose_unicode: bool) -> WalkDir {
+        WalkDir {
+            inner: WalkDirImpl::new(root).into(),
+            precompose_unicode,
+        }
     }
 
     /// Instantiate a new directory iterator which will not skip hidden files and is sorted, with the given level of `parallelism`.
-    pub fn walkdir_sorted_new(root: impl AsRef<Path>, _: Parallelism) -> WalkDir {
-        WalkDir::new(root).sort_by_file_name()
+    ///
+    /// Use `precompose_unicode` to represent the `core.precomposeUnicode` configuration option.
+    pub fn walkdir_sorted_new(root: &Path, _: Parallelism, precompose_unicode: bool) -> WalkDir {
+        WalkDir {
+            inner: WalkDirImpl::new(root).sort_by_file_name().into(),
+            precompose_unicode,
+        }
     }
 
     /// The Iterator yielding directory items
-    pub type DirEntryIter = walkdir::IntoIter;
+    pub type DirEntryIter = super::walkdir_precompose::WalkDirIter<walkdir::IntoIter, DirEntryImpl, walkdir::Error>;
 }
 
 #[cfg(any(feature = "walkdir", feature = "fs-walkdir-parallel"))]
@@ -112,133 +367,3 @@ pub fn open_options_no_follow() -> std::fs::OpenOptions {
     }
     options
 }
-
-mod snapshot {
-    use std::ops::Deref;
-
-    use crate::threading::{get_mut, get_ref, MutableOnDemand, OwnShared};
-
-    /// A structure holding enough information to reload a value if its on-disk representation changes as determined by its modified time.
-    #[derive(Debug)]
-    pub struct Snapshot<T: std::fmt::Debug> {
-        value: T,
-        modified: std::time::SystemTime,
-    }
-
-    impl<T: Clone + std::fmt::Debug> Clone for Snapshot<T> {
-        fn clone(&self) -> Self {
-            Self {
-                value: self.value.clone(),
-                modified: self.modified,
-            }
-        }
-    }
-
-    /// A snapshot of a resource which is up-to-date in the moment it is retrieved.
-    pub type SharedSnapshot<T> = OwnShared<Snapshot<T>>;
-
-    /// Use this type for fields in structs that are to store the [`Snapshot`], typically behind an [`OwnShared`].
-    ///
-    /// Note that the resource itself is behind another [`OwnShared`] to allow it to be used without holding any kind of lock, hence
-    /// without blocking updates while it is used.
-    #[derive(Debug, Default)]
-    pub struct MutableSnapshot<T: std::fmt::Debug>(pub MutableOnDemand<Option<SharedSnapshot<T>>>);
-
-    impl<T: std::fmt::Debug> Deref for Snapshot<T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            &self.value
-        }
-    }
-
-    impl<T: std::fmt::Debug> Deref for MutableSnapshot<T> {
-        type Target = MutableOnDemand<Option<SharedSnapshot<T>>>;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl<T: std::fmt::Debug> MutableSnapshot<T> {
-        /// Create a new instance of this type.
-        ///
-        /// Useful in case `Default::default()` isn't working for some reason.
-        pub fn new() -> Self {
-            MutableSnapshot(MutableOnDemand::new(None))
-        }
-
-        /// Refresh `state` forcefully by re-`open`ing the resource. Note that `open()` returns `None` if the resource isn't
-        /// present on disk, and that it's critical that the modified time is obtained _before_ opening the resource.
-        pub fn force_refresh<E>(
-            &self,
-            open: impl FnOnce() -> Result<Option<(std::time::SystemTime, T)>, E>,
-        ) -> Result<(), E> {
-            let mut state = get_mut(&self.0);
-            *state = open()?.map(|(modified, value)| OwnShared::new(Snapshot { value, modified }));
-            Ok(())
-        }
-
-        /// Assure that the resource in `state` is up-to-date by comparing the `current_modification_time` with the one we know in `state`
-        /// and by acting accordingly.
-        /// Returns the potentially updated/reloaded resource if it is still present on disk, which then represents a snapshot that is up-to-date
-        /// in that very moment, or `None` if the underlying file doesn't exist.
-        ///
-        /// Note that even though this is racy, each time a request is made there is a chance to see the actual state.
-        pub fn recent_snapshot<E>(
-            &self,
-            mut current_modification_time: impl FnMut() -> Option<std::time::SystemTime>,
-            open: impl FnOnce() -> Result<Option<T>, E>,
-        ) -> Result<Option<SharedSnapshot<T>>, E> {
-            let state = get_ref(self);
-            let recent_modification = current_modification_time();
-            let buffer = match (&*state, recent_modification) {
-                (None, None) => (*state).clone(),
-                (Some(_), None) => {
-                    drop(state);
-                    let mut state = get_mut(self);
-                    *state = None;
-                    (*state).clone()
-                }
-                (Some(snapshot), Some(modified_time)) => {
-                    if snapshot.modified < modified_time {
-                        drop(state);
-                        let mut state = get_mut(self);
-
-                        if let (Some(_snapshot), Some(modified_time)) = (&*state, current_modification_time()) {
-                            *state = open()?.map(|value| {
-                                OwnShared::new(Snapshot {
-                                    value,
-                                    modified: modified_time,
-                                })
-                            });
-                        }
-
-                        (*state).clone()
-                    } else {
-                        // Note that this relies on sub-section precision or else is a race when the packed file was just changed.
-                        // It's nothing we can know though, so… up to the caller unfortunately.
-                        Some(snapshot.clone())
-                    }
-                }
-                (None, Some(_modified_time)) => {
-                    drop(state);
-                    let mut state = get_mut(self);
-                    // Still in the same situation? If so, load the buffer. This compensates for the trampling herd
-                    // during lazy-loading at the expense of another mtime check.
-                    if let (None, Some(modified_time)) = (&*state, current_modification_time()) {
-                        *state = open()?.map(|value| {
-                            OwnShared::new(Snapshot {
-                                value,
-                                modified: modified_time,
-                            })
-                        });
-                    }
-                    (*state).clone()
-                }
-            };
-            Ok(buffer)
-        }
-    }
-}
-pub use snapshot::{MutableSnapshot, SharedSnapshot, Snapshot};

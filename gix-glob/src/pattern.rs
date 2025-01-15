@@ -12,7 +12,8 @@ bitflags! {
     /// keep special rules only applicable when matching paths.
     ///
     /// The mode is typically created when parsing the pattern by inspecting it and isn't typically handled by the user.
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone, Ord, PartialOrd)]
     pub struct Mode: u32 {
         /// The pattern does not contain a sub-directory and - it doesn't contain slashes after removing the trailing one.
         const NO_SUB_DIR = 1 << 0;
@@ -29,31 +30,41 @@ bitflags! {
 
 /// Describes whether to match a path case sensitively or not.
 ///
-/// Used in [Pattern::matches_repo_relative_path()].
-#[derive(Debug, PartialOrd, PartialEq, Copy, Clone, Hash, Ord, Eq)]
+/// Used in [`Pattern::matches_repo_relative_path()`].
+#[derive(Default, Debug, PartialOrd, PartialEq, Copy, Clone, Hash, Ord, Eq)]
 pub enum Case {
     /// The case affects the match
+    #[default]
     Sensitive,
     /// Ignore the case of ascii characters.
     Fold,
 }
 
-impl Default for Case {
-    fn default() -> Self {
-        Case::Sensitive
-    }
-}
-
+/// Instantiation
 impl Pattern {
     /// Parse the given `text` as pattern, or return `None` if `text` was empty.
     pub fn from_bytes(text: &[u8]) -> Option<Self> {
-        crate::parse::pattern(text).map(|(text, mode, first_wildcard_pos)| Pattern {
-            text,
+        crate::parse::pattern(text, true).map(|(text, mode, first_wildcard_pos)| Pattern {
+            text: text.into(),
             mode,
             first_wildcard_pos,
         })
     }
 
+    /// Parse the given `text` as pattern without supporting leading `!` or `\\!` , or return `None` if `text` was empty.
+    ///
+    /// This assures that `text` remains entirely unaltered, but removes built-in support for negation as well.
+    pub fn from_bytes_without_negation(text: &[u8]) -> Option<Self> {
+        crate::parse::pattern(text, false).map(|(text, mode, first_wildcard_pos)| Pattern {
+            text: text.into(),
+            mode,
+            first_wildcard_pos,
+        })
+    }
+}
+
+/// Access
+impl Pattern {
     /// Return true if a match is negated.
     pub fn is_negative(&self) -> bool {
         self.mode.contains(Mode::NEGATIVE)
@@ -65,30 +76,36 @@ impl Pattern {
     /// We may take various shortcuts which is when `basename_start_pos` and `is_dir` come into play.
     /// `basename_start_pos` is the index at which the `path`'s basename starts.
     ///
-    /// Lastly, `case` folding can be configured as well.
-    pub fn matches_repo_relative_path<'a>(
+    /// `case` folding can be configured as well.
+    /// `mode` is used to control how [`crate::wildmatch()`] should operate.
+    pub fn matches_repo_relative_path(
         &self,
-        path: impl Into<&'a BStr>,
+        path: &BStr,
         basename_start_pos: Option<usize>,
         is_dir: Option<bool>,
         case: Case,
+        mode: wildmatch::Mode,
     ) -> bool {
         let is_dir = is_dir.unwrap_or(false);
         if !is_dir && self.mode.contains(pattern::Mode::MUST_BE_DIR) {
             return false;
         }
 
-        let flags = wildmatch::Mode::NO_MATCH_SLASH_LITERAL
+        let flags = mode
             | match case {
                 Case::Fold => wildmatch::Mode::IGNORE_CASE,
                 Case::Sensitive => wildmatch::Mode::empty(),
             };
-        let path = path.into();
-        debug_assert_eq!(
-            basename_start_pos,
-            path.rfind_byte(b'/').map(|p| p + 1),
-            "BUG: invalid cached basename_start_pos provided"
-        );
+        #[cfg(debug_assertions)]
+        {
+            if basename_start_pos.is_some() {
+                debug_assert_eq!(
+                    basename_start_pos,
+                    path.rfind_byte(b'/').map(|p| p + 1),
+                    "BUG: invalid cached basename_start_pos provided"
+                );
+            }
+        }
         debug_assert!(!path.starts_with(b"/"), "input path must be relative");
 
         if self.mode.contains(pattern::Mode::NO_SUB_DIR) && !self.mode.contains(pattern::Mode::ABSOLUTE) {
@@ -104,19 +121,21 @@ impl Pattern {
     /// `mode` can identify `value` as path which won't match the slash character, and can match
     /// strings with cases ignored as well. Note that the case folding performed here is ASCII only.
     ///
-    /// Note that this method uses some shortcuts to accelerate simple patterns.
-    fn matches<'a>(&self, value: impl Into<&'a BStr>, mode: wildmatch::Mode) -> bool {
-        let value = value.into();
+    /// Note that this method uses some shortcuts to accelerate simple patterns, but falls back to
+    /// [wildmatch()][crate::wildmatch()] if these fail.
+    pub fn matches(&self, value: &BStr, mode: wildmatch::Mode) -> bool {
         match self.first_wildcard_pos {
             // "*literal" case, overrides starts-with
-            Some(pos) if self.mode.contains(pattern::Mode::ENDS_WITH) && !value.contains(&b'/') => {
+            Some(pos)
+                if self.mode.contains(pattern::Mode::ENDS_WITH)
+                    && (!mode.contains(wildmatch::Mode::NO_MATCH_SLASH_LITERAL) || !value.contains(&b'/')) =>
+            {
                 let text = &self.text[pos + 1..];
                 if mode.contains(wildmatch::Mode::IGNORE_CASE) {
                     value
                         .len()
                         .checked_sub(text.len())
-                        .map(|start| text.eq_ignore_ascii_case(&value[start..]))
-                        .unwrap_or(false)
+                        .is_some_and(|start| text.eq_ignore_ascii_case(&value[start..]))
                 } else {
                     value.ends_with(text.as_ref())
                 }
@@ -125,7 +144,7 @@ impl Pattern {
                 if mode.contains(wildmatch::Mode::IGNORE_CASE) {
                     if !value
                         .get(..pos)
-                        .map_or(false, |value| value.eq_ignore_ascii_case(&self.text[..pos]))
+                        .is_some_and(|value| value.eq_ignore_ascii_case(&self.text[..pos]))
                     {
                         return false;
                     }

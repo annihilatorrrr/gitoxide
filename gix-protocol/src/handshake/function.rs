@@ -22,14 +22,15 @@ where
     AuthFn: FnMut(credentials::helper::Action) -> credentials::protocol::Result,
     T: client::Transport,
 {
+    let _span = gix_features::trace::detail!("gix_protocol::handshake()", service = ?service, extra_parameters = ?extra_parameters);
     let (server_protocol_version, refs, capabilities) = {
         progress.init(None, progress::steps());
-        progress.set_name("handshake");
+        progress.set_name("handshake".into());
         progress.step();
 
         let extra_parameters: Vec<_> = extra_parameters
             .iter()
-            .map(|(k, v)| (k.as_str(), v.as_ref().map(|s| s.as_str())))
+            .map(|(k, v)| (k.as_str(), v.as_deref()))
             .collect();
         let supported_versions: Vec<_> = transport.supported_protocol_versions().into();
 
@@ -43,13 +44,13 @@ where
             Err(client::Error::Io(ref err)) if err.kind() == std::io::ErrorKind::PermissionDenied => {
                 drop(result); // needed to workaround this: https://github.com/rust-lang/rust/issues/76149
                 let url = transport.to_url().into_owned();
-                progress.set_name("authentication");
+                progress.set_name("authentication".into());
                 let credentials::protocol::Outcome { identity, next } =
                     authenticate(credentials::helper::Action::get_for_url(url.clone()))?
-                        .expect("FILL provides an identity or errors");
+                        .ok_or(Error::EmptyCredentials)?;
                 transport.set_identity(identity)?;
                 progress.step();
-                progress.set_name("handshake (authenticated)");
+                progress.set_name("handshake (authenticated)".into());
                 match transport.handshake(service, &extra_parameters).await {
                     Ok(v) => {
                         authenticate(next.store())?;
@@ -77,10 +78,12 @@ where
 
         let parsed_refs = match refs {
             Some(mut refs) => {
-                assert_eq!(
-                    actual_protocol,
-                    gix_transport::Protocol::V1,
-                    "Only V1 auto-responds with refs"
+                assert!(
+                    matches!(
+                        actual_protocol,
+                        gix_transport::Protocol::V0 | gix_transport::Protocol::V1
+                    ),
+                    "Only V(0|1) auto-responds with refs"
                 );
                 Some(
                     refs::from_v1_refs_received_as_part_of_handshake_and_capabilities(&mut refs, capabilities.iter())
@@ -92,9 +95,14 @@ where
         (actual_protocol, parsed_refs, capabilities)
     }; // this scope is needed, see https://github.com/rust-lang/rust/issues/76149
 
+    let (refs, v1_shallow_updates) = refs
+        .map(|(refs, shallow)| (Some(refs), Some(shallow)))
+        .unwrap_or_default();
+
     Ok(Outcome {
         server_protocol_version,
         refs,
+        v1_shallow_updates,
         capabilities,
     })
 }

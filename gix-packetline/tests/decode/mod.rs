@@ -103,7 +103,7 @@ mod streaming {
     fn error_on_oversized_line() {
         assert_err_display(
             streaming(b"ffff"),
-            "The data received claims to be larger than than the maximum allowed size: got 65535, exceeds 65516",
+            "The data received claims to be larger than the maximum allowed size: got 65535, exceeds 65516",
         );
     }
 
@@ -126,7 +126,7 @@ mod streaming {
     fn error_on_invalid_hex() {
         assert_err_display(
             streaming(b"fooo"),
-            "Failed to decode the first four hex bytes indicating the line length: Invalid character 'o' at position 1",
+            "Failed to decode the first four hex bytes indicating the line length: Invalid character",
         );
     }
 

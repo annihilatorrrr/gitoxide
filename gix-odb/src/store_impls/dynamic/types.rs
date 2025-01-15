@@ -18,7 +18,7 @@ pub(crate) type AtomicGeneration = AtomicU32;
 
 /// A way to indicate which pack indices we have seen already and which of them are loaded, along with an idea
 /// of whether stored `PackId`s are still usable.
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct SlotIndexMarker {
     /// The generation the `loaded_until_index` belongs to. Indices of different generations are completely incompatible.
     /// This value changes once the internal representation is compacted, something that may happen only if there is no handle
@@ -214,16 +214,16 @@ impl<T: Clone> OnDiskFile<T> {
         match std::mem::replace(&mut self.state, OnDiskFileState::Missing) {
             OnDiskFileState::Garbage(v) => self.state = OnDiskFileState::Loaded(v),
             OnDiskFileState::Missing => self.state = OnDiskFileState::Unloaded,
-            other @ OnDiskFileState::Loaded(_) | other @ OnDiskFileState::Unloaded => self.state = other,
+            other @ (OnDiskFileState::Loaded(_) | OnDiskFileState::Unloaded) => self.state = other,
         }
     }
 
     pub fn trash(&mut self) {
         match std::mem::replace(&mut self.state, OnDiskFileState::Missing) {
             OnDiskFileState::Loaded(v) => self.state = OnDiskFileState::Garbage(v),
-            other @ OnDiskFileState::Garbage(_)
-            | other @ OnDiskFileState::Unloaded
-            | other @ OnDiskFileState::Missing => self.state = other,
+            other @ (OnDiskFileState::Garbage(_) | OnDiskFileState::Unloaded | OnDiskFileState::Missing) => {
+                self.state = other;
+            }
         }
     }
 }
@@ -262,7 +262,7 @@ impl IndexAndPacks {
         }
     }
 
-    /// If we are garbage, put ourselves into the loaded state. Otherwise put ourselves back to unloaded.
+    /// If we are garbage, put ourselves into the loaded state. Otherwise, put ourselves back to unloaded.
     pub(crate) fn put_back(&mut self) {
         match self {
             IndexAndPacks::Index(bundle) => {
@@ -305,7 +305,7 @@ impl IndexAndPacks {
         match self {
             Self::Index(bundle) => bundle.index.is_disposable() || bundle.data.is_disposable(),
             Self::MultiIndex(bundle) => {
-                bundle.multi_index.is_disposable() || bundle.data.iter().any(|odf| odf.is_disposable())
+                bundle.multi_index.is_disposable() || bundle.data.iter().any(OnDiskFile::is_disposable)
             }
         }
     }
@@ -394,7 +394,7 @@ pub(crate) struct MutableIndexAndPack {
 
 /// A snapshot about resource usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Metrics {
     /// The total amount of handles which can be used to access object information.
     pub num_handles: usize,

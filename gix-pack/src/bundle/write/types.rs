@@ -2,8 +2,8 @@ use std::{hash::Hash, io, io::SeekFrom, path::PathBuf, sync::Arc};
 
 use gix_tempfile::handle::Writable;
 
-/// Configuration for [write_to_directory][crate::Bundle::write_to_directory()] or
-/// [write_to_directory_eagerly][crate::Bundle::write_to_directory_eagerly()]
+/// Configuration for [`write_to_directory`][crate::Bundle::write_to_directory()] or
+/// [`write_to_directory_eagerly`][crate::Bundle::write_to_directory_eagerly()]
 #[derive(Debug, Clone)]
 pub struct Options {
     /// The amount of threads to use at most when resolving the pack. If `None`, all logical cores are used.
@@ -28,23 +28,25 @@ impl Default for Options {
     }
 }
 
-/// Returned by [write_to_directory][crate::Bundle::write_to_directory()] or
-/// [write_to_directory_eagerly][crate::Bundle::write_to_directory_eagerly()]
+/// Returned by [`write_to_directory`][crate::Bundle::write_to_directory()] or
+/// [`write_to_directory_eagerly`][crate::Bundle::write_to_directory_eagerly()]
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Outcome {
-    /// The successful result of the index write operation
+    /// The successful result of the index write operation.
     pub index: crate::index::write::Outcome,
-    /// The version of the pack
+    /// The version of the pack.
     pub pack_version: crate::data::Version,
-    /// The kind of hash stored within the pack and indices
+    /// The kind of hash stored within the pack and indices.
     pub object_hash: gix_hash::Kind,
 
-    /// The path to the pack index file
+    /// The path to the pack index file.
     pub index_path: Option<PathBuf>,
-    /// The path to the pack data file
+    /// The path to the pack data file.
     pub data_path: Option<PathBuf>,
     /// The path to the `.keep` file to prevent collection of the newly written pack until refs are pointing to it.
+    /// It might be `None` if the file at `data_path` already existed, indicating that we have received a pack that
+    /// was already present locally.
     ///
     /// The file is created right before moving the pack data and index data into place (i.e. `data_path` and `index_path`)
     /// and is expected to be removed by the caller when ready.
@@ -89,7 +91,7 @@ where
     }
 
     fn consume(&mut self, amt: usize) {
-        self.reader.consume(amt)
+        self.reader.consume(amt);
     }
 }
 

@@ -1,3 +1,4 @@
+use std::path::Component;
 use std::{
     borrow::Cow,
     ffi::{OsStr, OsString},
@@ -33,6 +34,14 @@ pub fn os_string_into_bstring(path: OsString) -> Result<BString, Utf8Error> {
     match path {
         Cow::Borrowed(_path) => unreachable!("borrowed cows stay borrowed"),
         Cow::Owned(path) => Ok(path),
+    }
+}
+
+/// Like [`into_bstr()`], but takes `Cow<OsStr>` as input for a lossless, but fallible, conversion.
+pub fn try_os_str_into_bstr(path: Cow<'_, OsStr>) -> Result<Cow<'_, BStr>, Utf8Error> {
+    match path {
+        Cow::Borrowed(path) => os_str_into_bstr(path).map(Cow::Borrowed),
+        Cow::Owned(path) => os_string_into_bstring(path).map(Cow::Owned),
     }
 }
 
@@ -80,6 +89,16 @@ pub fn try_into_bstr<'a>(path: impl Into<Cow<'a, Path>>) -> Result<Cow<'a, BStr>
 /// Similar to [`try_into_bstr()`] but **panics** if malformed surrogates are encountered on windows.
 pub fn into_bstr<'a>(path: impl Into<Cow<'a, Path>>) -> Cow<'a, BStr> {
     try_into_bstr(path).expect("prefix path doesn't contain ill-formed UTF-8")
+}
+
+/// Join `path` to `base` such that they are separated with a `/`, i.e. `base/path`.
+pub fn join_bstr_unix_pathsep<'a, 'b>(base: impl Into<Cow<'a, BStr>>, path: impl Into<&'b BStr>) -> Cow<'a, BStr> {
+    let mut base = base.into();
+    if !base.is_empty() && base.last() != Some(&b'/') {
+        base.to_mut().push(b'/');
+    }
+    base.to_mut().extend_from_slice(path.into());
+    base
 }
 
 /// Given `input` bytes, produce a `Path` from them ignoring encoding entirely if on unix.
@@ -229,23 +248,22 @@ pub fn to_windows_separators<'a>(path: impl Into<Cow<'a, BStr>>) -> Cow<'a, BStr
 /// Resolve relative components virtually without accessing the file system, e.g. turn `a/./b/c/.././..` into `a`,
 /// without keeping intermediate `..` and `/a/../b/..` becomes `/`.
 /// If the input path was relative and ends up being the `current_dir`, `.` is returned instead of the full path to `current_dir`.
+/// Note that single `.` components as well as duplicate separators are left untouched.
 ///
 /// This is particularly useful when manipulating paths that are based on user input, and not resolving intermediate
 /// symlinks keeps the path similar to what the user provided. If that's not desirable, use `[realpath()][crate::realpath()`
 /// instead.
 ///
 /// Note that we might access the `current_dir` if we run out of path components to pop off, which is expected to be absolute
-/// as typical return value of `std::env::current_dir()`.
+/// as typical return value of `std::env::current_dir()` or `gix_fs::current_dir(…)` when `core.precomposeUnicode` is known.
 /// As a `current_dir` like `/c` can be exhausted by paths like `../../r`, `None` will be returned to indicate the inability
 /// to produce a logically consistent path.
-pub fn normalize<'a>(path: impl Into<Cow<'a, Path>>, current_dir: impl AsRef<Path>) -> Option<Cow<'a, Path>> {
+pub fn normalize<'a>(path: Cow<'a, Path>, current_dir: &Path) -> Option<Cow<'a, Path>> {
     use std::path::Component::ParentDir;
 
-    let path = path.into();
     if !path.components().any(|c| matches!(c, ParentDir)) {
         return Some(path);
     }
-    let current_dir = current_dir.as_ref();
     let mut current_dir_opt = Some(current_dir);
     let was_relative = path.is_relative();
     let components = path.components();
@@ -260,7 +278,7 @@ pub fn normalize<'a>(path: impl Into<Cow<'a, Path>>, current_dir: impl AsRef<Pat
                 return None;
             }
         } else {
-            path.push(component)
+            path.push(component);
         }
     }
 
@@ -270,4 +288,49 @@ pub fn normalize<'a>(path: impl Into<Cow<'a, Path>>, current_dir: impl AsRef<Pat
         path.into()
     }
     .into()
+}
+
+/// Rebuild the worktree-relative `relative_path` to be relative to `prefix`, which is the worktree-relative
+/// path equivalent to the position of the user, or current working directory.
+/// This is a no-op if `prefix` is empty.
+///
+/// Note that both `relative_path` and `prefix` are assumed to be [normalized](normalize()), and failure to do so
+/// will lead to incorrect results.
+///
+/// Note that both input paths are expected to be equal in terms of case too, as comparisons will be case-sensitive.
+pub fn relativize_with_prefix<'a>(relative_path: &'a Path, prefix: &Path) -> Cow<'a, Path> {
+    if prefix.as_os_str().is_empty() {
+        return Cow::Borrowed(relative_path);
+    }
+    debug_assert!(
+        relative_path.components().all(|c| matches!(c, Component::Normal(_))),
+        "BUG: all input is expected to be normalized, but relative_path was not"
+    );
+    debug_assert!(
+        prefix.components().all(|c| matches!(c, Component::Normal(_))),
+        "BUG: all input is expected to be normalized, but prefix was not"
+    );
+
+    let mut buf = PathBuf::new();
+    let mut rpc = relative_path.components().peekable();
+    let mut equal_thus_far = true;
+    for pcomp in prefix.components() {
+        if equal_thus_far {
+            if let (Component::Normal(pname), Some(Component::Normal(rpname))) = (pcomp, rpc.peek()) {
+                if &pname == rpname {
+                    rpc.next();
+                    continue;
+                } else {
+                    equal_thus_far = false;
+                }
+            }
+        }
+        buf.push(Component::ParentDir);
+    }
+    buf.extend(rpc);
+    if buf.as_os_str().is_empty() {
+        Cow::Borrowed(Path::new("."))
+    } else {
+        Cow::Owned(buf)
+    }
 }

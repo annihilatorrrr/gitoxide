@@ -25,7 +25,7 @@ pub enum Error {
     #[error("Both sides of the specification need a pattern, like 'a/*:b/*'")]
     PatternUnbalanced,
     #[error(transparent)]
-    ReferenceName(#[from] gix_validate::refname::Error),
+    ReferenceName(#[from] gix_validate::reference::name::Error),
     #[error(transparent)]
     RevSpec(#[from] gix_revision::spec::parse::Error),
 }
@@ -151,7 +151,7 @@ pub(crate) mod function {
     }
 
     fn looks_like_object_hash(spec: &BStr) -> bool {
-        spec.len() >= gix_hash::Kind::shortest().len_in_hex() && spec.iter().all(|b| b.is_ascii_hexdigit())
+        spec.len() >= gix_hash::Kind::shortest().len_in_hex() && spec.iter().all(u8::is_ascii_hexdigit)
     }
 
     fn validated(spec: Option<&BStr>, allow_revspecs: bool) -> Result<(Option<&BStr>, bool), Error> {
@@ -173,16 +173,8 @@ pub(crate) mod function {
                         .map_err(Error::from)
                         .or_else(|err| {
                             if allow_revspecs {
-                                match gix_revision::spec::parse(spec, &mut super::revparse::Noop) {
-                                    Ok(_) => {
-                                        if spec.iter().any(|b| b.is_ascii_whitespace()) {
-                                            Err(err)
-                                        } else {
-                                            Ok(spec)
-                                        }
-                                    }
-                                    Err(err) => Err(err.into()),
-                                }
+                                gix_revision::spec::parse(spec, &mut super::revparse::Noop)?;
+                                Ok(spec)
                             } else {
                                 Err(err)
                             }

@@ -4,7 +4,7 @@ use crate::client::WriteMode;
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
-    #[error("Could initialize the http client")]
+    #[error("Could not initialize the http client")]
     InitHttpClient {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
@@ -35,7 +35,7 @@ impl crate::IsSpuriousError for Error {
     }
 }
 
-/// The return value of [Http::get()].
+/// The return value of [`Http::get()`].
 pub struct GetResponse<H, B> {
     /// The response headers.
     pub headers: H,
@@ -43,7 +43,7 @@ pub struct GetResponse<H, B> {
     pub body: B,
 }
 
-/// The return value of [Http::post()].
+/// The return value of [`Http::post()`].
 pub struct PostResponse<H, B, PB> {
     /// The body to post to the server as part of the request.
     ///
@@ -84,7 +84,7 @@ impl<A, B, C> From<PostResponse<A, B, C>> for GetResponse<A, B> {
 }
 
 /// A trait to abstract the HTTP operations needed to power all git interactions: read via GET and write via POST.
-/// Note that 401 must be turned into `std::io::Error(PermissionDenied)`, and other non-success http stati must be transformed
+/// Note that 401 must be turned into `std::io::Error(PermissionDenied)`, and other non-success http statuses must be transformed
 /// into `std::io::Error(Other)`
 #[allow(clippy::type_complexity)]
 pub trait Http {

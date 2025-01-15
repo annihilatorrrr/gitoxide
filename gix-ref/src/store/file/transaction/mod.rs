@@ -8,32 +8,25 @@ use crate::{
     transaction::RefEdit,
 };
 
-/// A function receiving an object id to resolve, returning its decompressed bytes,
-/// used to obtain the peeled object ids for storage in packed-refs files.
-///
-/// Resolution means to follow tag objects until the end of the chain.
-pub type FindObjectFn<'a> = dyn FnMut(
-        gix_hash::ObjectId,
-        &mut Vec<u8>,
-    ) -> Result<Option<gix_object::Kind>, Box<dyn std::error::Error + Send + Sync + 'static>>
-    + 'a;
-
 /// How to handle packed refs during a transaction
+#[derive(Default)]
 pub enum PackedRefs<'a> {
-    /// Only propagate deletions of references. This is the default
+    /// Only propagate deletions of references. This is the default.
+    /// This means deleted references are removed from disk if they are loose and from the packed-refs file if they are present.
+    #[default]
     DeletionsOnly,
-    /// Propagate deletions as well as updates to references which are peeled, that is contain an object id
-    DeletionsAndNonSymbolicUpdates(Box<FindObjectFn<'a>>),
-    /// Propagate deletions as well as updates to references which are peeled, that is contain an object id. Furthermore delete the
+    /// Propagate deletions as well as updates to references which are peeled and contain an object id.
+    ///
+    /// This means deleted references are removed from disk if they are loose and from the packed-refs file if they are present,
+    /// while updates are also written into the loose file as well as into packed-refs, potentially creating an entry.
+    DeletionsAndNonSymbolicUpdates(Box<dyn gix_object::Find + 'a>),
+    /// Propagate deletions as well as updates to references which are peeled and contain an object id. Furthermore delete the
     /// reference which is originally updated if it exists. If it doesn't, the new value will be written into the packed ref right away.
     /// Note that this doesn't affect symbolic references at all, which can't be placed into packed refs.
-    DeletionsAndNonSymbolicUpdatesRemoveLooseSourceReference(Box<FindObjectFn<'a>>),
-}
-
-impl Default for PackedRefs<'_> {
-    fn default() -> Self {
-        PackedRefs::DeletionsOnly
-    }
+    ///
+    /// Thus, this is similar to `DeletionsAndNonSymbolicUpdates`, but removes the loose reference after the update, leaving only their copy
+    /// in `packed-refs`.
+    DeletionsAndNonSymbolicUpdatesRemoveLooseSourceReference(Box<dyn gix_object::Find + 'a>),
 }
 
 #[derive(Debug)]
@@ -84,7 +77,7 @@ impl file::Store {
     }
 }
 
-impl<'s, 'p> Transaction<'s, 'p> {
+impl<'p> Transaction<'_, 'p> {
     /// Configure the way packed refs are handled during the transaction
     pub fn packed_refs(mut self, packed_refs: PackedRefs<'p>) -> Self {
         self.packed_refs = packed_refs;
@@ -96,7 +89,7 @@ impl std::fmt::Debug for Transaction<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Transaction")
             .field("store", self.store)
-            .field("edits", &self.updates.as_ref().map(|u| u.len()))
+            .field("edits", &self.updates.as_ref().map(Vec::len))
             .finish_non_exhaustive()
     }
 }

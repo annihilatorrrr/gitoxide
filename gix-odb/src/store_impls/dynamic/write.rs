@@ -8,7 +8,7 @@ use crate::store;
 mod error {
     use crate::{loose, store};
 
-    /// The error returned by the [dynamic Store's][crate::Store] [`Write`][crate::Write] implementation.
+    /// The error returned by the [dynamic Store's][crate::Store] [`Write`](gix_object::Write) implementation.
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {
@@ -24,20 +24,19 @@ pub use error::Error;
 
 use crate::store_impls::dynamic;
 
-impl<S> crate::Write for store::Handle<S>
+impl<S> gix_object::Write for store::Handle<S>
 where
     S: Deref<Target = dynamic::Store> + Clone,
 {
-    type Error = Error;
-
-    fn write_stream(&self, kind: Kind, size: u64, from: impl Read) -> Result<ObjectId, Self::Error> {
+    fn write_stream(&self, kind: Kind, size: u64, from: &mut dyn Read) -> Result<ObjectId, gix_object::write::Error> {
         let mut snapshot = self.snapshot.borrow_mut();
         Ok(match snapshot.loose_dbs.first() {
             Some(ldb) => ldb.write_stream(kind, size, from)?,
             None => {
                 let new_snapshot = self
                     .store
-                    .load_one_index(self.refresh, snapshot.marker)?
+                    .load_one_index(self.refresh, snapshot.marker)
+                    .map_err(Box::new)?
                     .expect("there is always at least one ODB, and this code runs only once for initialization");
                 *snapshot = new_snapshot;
                 snapshot.loose_dbs[0].write_stream(kind, size, from)?

@@ -1,22 +1,22 @@
-use crate::fixture_path;
+use gix_testtools::fixture_path_standalone;
 
 fn db() -> gix_odb::Handle {
-    gix_odb::at(fixture_path("objects")).expect("valid object path")
+    gix_odb::at(fixture_path_standalone("objects")).expect("valid object path")
 }
 
 use crate::hex_to_id;
 
-fn can_find(db: impl gix_odb::Find, hex_id: &str) {
+fn can_find(db: impl gix_object::Find, hex_id: &str) {
     let mut buf = vec![];
     assert!(db
-        .try_find(hex_to_id(hex_id), &mut buf)
+        .try_find(&hex_to_id(hex_id), &mut buf)
         .expect("no read error")
         .is_some());
 }
 
 #[test]
 fn loose_object() {
-    can_find(&db(), "37d4e6c5c48ba0d245164c4e10d5f41140cab980");
+    can_find(db(), "37d4e6c5c48ba0d245164c4e10d5f41140cab980");
 }
 
 #[test]

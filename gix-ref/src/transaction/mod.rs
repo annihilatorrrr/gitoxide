@@ -64,7 +64,7 @@ pub enum Change {
         /// The desired change to the reference log.
         log: LogChange,
         /// The expected value already present in the reference.
-        /// If a ref was existing previously it will be overwritten at `MustExistAndMatch(actual_value)` for use after
+        /// If a ref was existing previously this field will be overwritten with `MustExistAndMatch(actual_value)` for use after
         /// the transaction was committed successfully.
         expected: PreviousValue,
         /// The new state of the reference, either for updating an existing one or creating a new one.
@@ -94,21 +94,12 @@ impl Change {
     /// Return references to values that are in common between all variants and denote the previous observed value.
     pub fn previous_value(&self) -> Option<crate::TargetRef<'_>> {
         match self {
-            // TODO: use or-patterns once MRV is larger than 1.52 (and this is supported)
             Change::Update {
-                expected: PreviousValue::MustExistAndMatch(previous),
-                ..
-            }
-            | Change::Update {
-                expected: PreviousValue::ExistingMustMatch(previous),
+                expected: PreviousValue::MustExistAndMatch(previous) | PreviousValue::ExistingMustMatch(previous),
                 ..
             }
             | Change::Delete {
-                expected: PreviousValue::MustExistAndMatch(previous),
-                ..
-            }
-            | Change::Delete {
-                expected: PreviousValue::ExistingMustMatch(previous),
+                expected: PreviousValue::MustExistAndMatch(previous) | PreviousValue::ExistingMustMatch(previous),
                 ..
             } => previous,
             _ => return None,

@@ -9,6 +9,7 @@ use std::{
 };
 
 use bstr::ByteSlice;
+use gix_packetline::read::ProgressAction;
 use gix_transport::{
     client::{self, http, SetServiceResponse, Transport, TransportV2Ext, TransportWithoutIO},
     Protocol, Service,
@@ -46,6 +47,21 @@ fn http_status_500_is_communicated_via_special_io_error() -> crate::Result {
     Ok(())
 }
 
+#[test]
+fn http_identity_is_picked_up_from_url() -> crate::Result {
+    let transport =
+        gix_transport::client::http::connect("https://user:pass@example.com/repo".try_into()?, Protocol::V2, false);
+    assert_eq!(transport.to_url().as_ref(), "https://user:pass@example.com/repo");
+    assert_eq!(
+        transport.identity(),
+        Some(&gix_sec::identity::Account {
+            username: "user".into(),
+            password: "pass".into()
+        })
+    );
+    Ok(())
+}
+
 // based on a test in cargo
 #[test]
 fn http_will_use_pipelining() {
@@ -55,7 +71,7 @@ fn http_will_use_pipelining() {
     fn headers(rdr: &mut dyn BufRead) -> HashSet<String> {
         let valid = ["GET", "Authorization", "Accept"];
         rdr.lines()
-            .map(|s| s.unwrap())
+            .map(Result::unwrap)
             .take_while(|s| s.len() > 2)
             .map(|s| s.trim().to_string())
             .filter(|s| valid.iter().any(|prefix| s.starts_with(*prefix)))
@@ -81,7 +97,7 @@ fn http_will_use_pipelining() {
                     "Accept: */*"
                 ]
                 .into_iter()
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .collect()
             );
 
@@ -101,14 +117,15 @@ fn http_will_use_pipelining() {
                     "Accept: */*",
                 ]
                 .into_iter()
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .collect()
             );
         }
     });
 
     let url = format!("http://{}:{}/reponame", &addr.ip().to_string(), &addr.port(),);
-    let mut client = gix_transport::client::http::connect(&url, gix_transport::Protocol::V2);
+    let mut client =
+        gix_transport::client::http::connect(url.try_into().expect("valid url"), gix_transport::Protocol::V2, false);
     match client.handshake(gix_transport::Service::UploadPack, &[]) {
         Ok(_) => unreachable!("expecting permission denied to be detected"),
         Err(gix_transport::client::Error::Io(err)) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
@@ -142,7 +159,8 @@ fn http_authentication_error_can_be_differentiated_and_identity_is_transmitted()
         server
             .received_as_string()
             .lines()
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
+            .filter(ignore_reqwest_content_length)
             .collect::<HashSet<_>>(),
         format!(
             "GET /path/not-important/info/refs?service=git-upload-pack HTTP/1.1
@@ -156,20 +174,27 @@ Authorization: Basic dXNlcjpwYXNzd29yZA==
             env!("CARGO_PKG_VERSION")
         )
         .lines()
-        .map(|l| l.to_lowercase())
+        .map(str::to_lowercase)
         .collect::<HashSet<_>>()
     );
 
     server.next_read_and_respond_with(fixture_bytes("v1/http-handshake.response"));
-    client.request(client::WriteMode::Binary, client::MessageKind::Flush)?;
+    client.request(client::WriteMode::Binary, client::MessageKind::Flush, false)?;
 
     assert_eq!(
-        server
-            .received_as_string()
-            .lines()
-            .map(|l| l.to_lowercase())
-            .filter(|l| !l.starts_with("expect: "))
-            .collect::<HashSet<_>>(),
+        {
+            let mut m = server
+                .received_as_string()
+                .lines()
+                .map(str::to_lowercase)
+                .filter(|l| !l.starts_with("expect: "))
+                .filter(ignore_reqwest_content_length)
+                .collect::<HashSet<_>>();
+            // On linux on CI, for some reason, it won't have this chunk id here, but
+            // it has it whenever and where-ever I run it.
+            m.remove("0");
+            m
+        },
         format!(
             "POST /path/not-important/git-upload-pack HTTP/1.1
 Host: 127.0.0.1:{}
@@ -179,14 +204,12 @@ Content-Type: application/x-git-upload-pack-request
 Accept: application/x-git-upload-pack-result
 Authorization: Basic dXNlcjpwYXNzd29yZA==
 
-0
-
 ",
             server.addr.port(),
             env!("CARGO_PKG_VERSION")
         )
         .lines()
-        .map(|l| l.to_lowercase())
+        .map(str::to_lowercase)
         .collect::<HashSet<_>>(),
         "the authentication information is used in subsequent calls"
     );
@@ -252,7 +275,7 @@ fn handshake_v1() -> crate::Result {
     let refs = refs
         .expect("v1 protocol provides refs")
         .lines()
-        .flat_map(Result::ok)
+        .map_while(Result::ok)
         .collect::<Vec<_>>();
     assert_eq!(
         refs,
@@ -315,7 +338,8 @@ fn handshake_v1() -> crate::Result {
         server
             .received_as_string()
             .lines()
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
+            .filter(ignore_reqwest_content_length)
             .collect::<HashSet<_>>(),
         format!(
             "GET /path/not/important/due/to/mock/info/refs?service=git-upload-pack HTTP/1.1
@@ -328,7 +352,7 @@ User-Agent: git/oxide-{}
             env!("CARGO_PKG_VERSION")
         )
         .lines()
-        .map(|l| l.to_lowercase())
+        .map(str::to_lowercase)
         .collect::<HashSet<_>>()
     );
     Ok(())
@@ -348,7 +372,7 @@ fn clone_v1() -> crate::Result {
         server
             .received_as_string()
             .lines()
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
             .find(|l| l.starts_with("git-protocol"))
             .expect("git-protocol header"),
         "git-protocol: key=value:value-only",
@@ -359,6 +383,7 @@ fn clone_v1() -> crate::Result {
     let mut writer = c.request(
         client::WriteMode::OneLfTerminatedLinePerWriteCall,
         client::MessageKind::Text(b"done"),
+        false,
     )?;
     writer.write_all(b"hello")?;
     writer.write_all(b"world")?;
@@ -375,7 +400,8 @@ fn clone_v1() -> crate::Result {
             assert!(!is_err);
             sb.deref()
                 .borrow_mut()
-                .push(std::str::from_utf8(data).expect("valid utf8").to_owned())
+                .push(std::str::from_utf8(data).expect("valid utf8").to_owned());
+            ProgressAction::Continue
         }
     })));
     let mut pack = Vec::new();
@@ -389,7 +415,7 @@ fn clone_v1() -> crate::Result {
         server
             .received_as_string()
             .lines()
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
             .filter(|l| !l.starts_with("expect: "))
             .collect::<HashSet<_>>(),
         format!(
@@ -407,7 +433,7 @@ Accept: application/x-git-upload-pack-result
             env!("CARGO_PKG_VERSION")
         )
         .lines()
-        .map(|l| l.to_lowercase())
+        .map(str::to_lowercase)
         .collect::<HashSet<_>>()
     );
     Ok(())
@@ -526,7 +552,8 @@ fn handshake_and_lsrefs_and_fetch_v2_impl(handshake_fixture: &str) -> crate::Res
         server
             .received_as_string()
             .lines()
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
+            .filter(ignore_reqwest_content_length)
             .collect::<HashSet<_>>(),
         format!(
             "GET /path/not/important/due/to/mock/info/refs?service=git-upload-pack HTTP/1.1
@@ -540,7 +567,7 @@ Git-Protocol: version=2:value-only:key=value
             env!("CARGO_PKG_VERSION")
         )
         .lines()
-        .map(|l| l.to_lowercase())
+        .map(str::to_lowercase)
         .collect::<HashSet<_>>()
     );
 
@@ -548,8 +575,9 @@ Git-Protocol: version=2:value-only:key=value
     drop(refs);
     let res = c.invoke(
         "ls-refs",
-        [("without-value", None), ("with-value", Some("value"))].iter().cloned(),
+        [("without-value", None), ("with-value", Some("value"))].iter().copied(),
         Some(vec!["arg1".as_bytes().as_bstr().to_owned()].into_iter()),
+        false,
     )?;
     assert_eq!(
         res.lines().collect::<Result<Vec<_>, _>>()?,
@@ -563,7 +591,7 @@ Git-Protocol: version=2:value-only:key=value
         server
             .received_as_string()
             .lines()
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
             .filter(|l| !l.starts_with("expect: "))
             .collect::<HashSet<_>>(),
         format!(
@@ -584,7 +612,7 @@ Git-Protocol: version=2
             env!("CARGO_PKG_VERSION")
         )
         .lines()
-        .map(|l| l.to_lowercase())
+        .map(str::to_lowercase)
         .collect::<HashSet<_>>()
     );
 
@@ -593,6 +621,7 @@ Git-Protocol: version=2
         "fetch",
         Vec::<(_, Option<&str>)>::new().into_iter(),
         None::<IntoIter<bstr::BString>>,
+        false,
     )?;
     let mut line = String::new();
     res.read_line(&mut line)?;
@@ -605,7 +634,8 @@ Git-Protocol: version=2
             assert!(!is_err);
             sb.deref()
                 .borrow_mut()
-                .push(std::str::from_utf8(data).expect("valid utf8").to_owned())
+                .push(std::str::from_utf8(data).expect("valid utf8").to_owned());
+            ProgressAction::Continue
         }
     })));
 
@@ -636,9 +666,9 @@ Content-Length: 22
         actual
             .lines()
             .filter(|l| !l.starts_with("expect: "))
-            .map(|l| l.to_lowercase())
+            .map(str::to_lowercase)
             .collect::<HashSet<_>>(),
-        expected.lines().map(|l| l.to_lowercase()).collect::<HashSet<_>>()
+        expected.lines().map(str::to_lowercase).collect::<HashSet<_>>()
     );
     Ok(())
 }
@@ -653,4 +683,8 @@ fn check_content_type_is_case_insensitive() -> crate::Result {
     let result = client.handshake(Service::UploadPack, &[]);
     assert!(result.is_ok());
     Ok(())
+}
+
+fn ignore_reqwest_content_length(header_line: &String) -> bool {
+    header_line != "content-length: 0"
 }

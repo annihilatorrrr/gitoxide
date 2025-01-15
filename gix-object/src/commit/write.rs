@@ -6,7 +6,7 @@ use crate::{encode, encode::NL, Commit, CommitRef, Kind};
 
 impl crate::WriteTo for Commit {
     /// Serializes this instance to `out` in the git serialization format.
-    fn write_to(&self, mut out: impl io::Write) -> io::Result<()> {
+    fn write_to(&self, mut out: &mut dyn io::Write) -> io::Result<()> {
         encode::trusted_header_id(b"tree", &self.tree, &mut out)?;
         for parent in &self.parents {
             encode::trusted_header_id(b"parent", parent, &mut out)?;
@@ -27,33 +27,32 @@ impl crate::WriteTo for Commit {
         Kind::Commit
     }
 
-    fn size(&self) -> usize {
+    fn size(&self) -> u64 {
         let hash_in_hex = self.tree.kind().len_in_hex();
-        b"tree".len() + 1 /*space*/ + hash_in_hex + 1 /* nl */
+        (b"tree".len() + 1 /*space*/ + hash_in_hex + 1 /* nl */
         + self.parents.iter().count() * (b"parent".len() + 1 + hash_in_hex + 1)
             + b"author".len() + 1 /* space */ + self.author.size() + 1 /* nl */
             + b"committer".len() + 1 /* space */ + self.committer.size() + 1 /* nl */
             + self
                 .encoding
                 .as_ref()
-                .map(|e| b"encoding".len() + 1 /* space */ + e.len() + 1 /* nl */)
-                .unwrap_or(0)
+                .map_or(0, |e| b"encoding".len() + 1 /* space */ + e.len() + 1 /* nl */)
             + self
                 .extra_headers
                 .iter()
                 .map(|(name, value)| {
-                    // each header *value* is preceded by a space and followed by a newline
-                    name.len() + value.split_str("\n").map(|s| s.len() + 2).sum::<usize>()
+                    // each header *value* is preceded by a space, and it starts right after the name.
+                    name.len() + value.lines_with_terminator().map(|s| s.len() + 1).sum::<usize>() + usize::from(!value.ends_with_str(b"\n"))
                 })
                 .sum::<usize>()
             + 1 /* nl */
-            + self.message.len()
+            + self.message.len()) as u64
     }
 }
 
-impl<'a> crate::WriteTo for CommitRef<'a> {
+impl crate::WriteTo for CommitRef<'_> {
     /// Serializes this instance to `out` in the git serialization format.
-    fn write_to(&self, mut out: impl io::Write) -> io::Result<()> {
+    fn write_to(&self, mut out: &mut dyn io::Write) -> io::Result<()> {
         encode::trusted_header_id(b"tree", &self.tree(), &mut out)?;
         for parent in self.parents() {
             encode::trusted_header_id(b"parent", &parent, &mut out)?;
@@ -74,26 +73,25 @@ impl<'a> crate::WriteTo for CommitRef<'a> {
         Kind::Commit
     }
 
-    fn size(&self) -> usize {
+    fn size(&self) -> u64 {
         let hash_in_hex = self.tree().kind().len_in_hex();
-        b"tree".len() + 1 /* space */ + hash_in_hex + 1 /* nl */
+        (b"tree".len() + 1 /* space */ + hash_in_hex + 1 /* nl */
             + self.parents.iter().count() * (b"parent".len() + 1 /* space */ + hash_in_hex + 1 /* nl */)
             + b"author".len() + 1 /* space */ + self.author.size() + 1 /* nl */
             + b"committer".len() + 1 /* space */ + self.committer.size() + 1 /* nl */
             + self
                 .encoding
                 .as_ref()
-                .map(|e| b"encoding".len() + 1 /* space */ + e.len() + 1 /* nl */)
-                .unwrap_or(0)
+                .map_or(0, |e| b"encoding".len() + 1 /* space */ + e.len() + 1 /* nl */)
             + self
                 .extra_headers
                 .iter()
                 .map(|(name, value)| {
-                    // each header *value* is preceded by a space and followed by a newline
-                    name.len() + value.split_str("\n").map(|s| s.len() + 2).sum::<usize>()
+                    // each header *value* is preceded by a space, and it starts right after the name.
+                    name.len() + value.lines_with_terminator().map(|s| s.len() + 1).sum::<usize>() + usize::from(!value.ends_with_str(b"\n"))
                 })
                 .sum::<usize>()
             + 1 /* nl */
-            + self.message.len()
+            + self.message.len()) as u64
     }
 }

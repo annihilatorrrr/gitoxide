@@ -1,16 +1,15 @@
 use std::{
-    convert::TryInto,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
     time::{Instant, SystemTime},
 };
 
-use gix_features::progress::Progress;
+use gix_features::progress::{Count, DynNestedProgress, Progress};
 
 use crate::multi_index;
 
 mod error {
-    /// The error returned by [multi_index::File::write_from_index_paths()][super::multi_index::File::write_from_index_paths()]..
+    /// The error returned by [`multi_index::File::write_from_index_paths()`][super::multi_index::File::write_from_index_paths()]..
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {
@@ -40,11 +39,9 @@ pub struct Options {
 }
 
 /// The result of [`multi_index::File::write_from_index_paths()`].
-pub struct Outcome<P> {
+pub struct Outcome {
     /// The calculated multi-index checksum of the file at `multi_index_path`.
     pub multi_index_checksum: gix_hash::ObjectId,
-    /// The input progress
-    pub progress: P,
 }
 
 /// The progress ids used in [`write_from_index_paths()`][multi_index::File::write_from_index_paths()].
@@ -79,16 +76,13 @@ impl multi_index::File {
     /// Create a new multi-index file for writing to `out` from the pack index files at `index_paths`.
     ///
     /// Progress is sent to `progress` and interruptions checked via `should_interrupt`.
-    pub fn write_from_index_paths<P>(
+    pub fn write_from_index_paths(
         mut index_paths: Vec<PathBuf>,
-        out: impl std::io::Write,
-        mut progress: P,
+        out: &mut dyn std::io::Write,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
         Options { object_hash }: Options,
-    ) -> Result<Outcome<P>, Error>
-    where
-        P: Progress,
-    {
+    ) -> Result<Outcome, Error> {
         let out = gix_features::hash::Write::new(out, object_hash);
         let (index_paths_sorted, index_filenames_sorted) = {
             index_paths.sort();
@@ -102,8 +96,10 @@ impl multi_index::File {
         let entries = {
             let mut entries = Vec::new();
             let start = Instant::now();
-            let mut progress =
-                progress.add_child_with_id("Collecting entries", ProgressId::FromPathsCollectingEntries.into());
+            let mut progress = progress.add_child_with_id(
+                "Collecting entries".into(),
+                ProgressId::FromPathsCollectingEntries.into(),
+            );
             progress.init(Some(index_paths_sorted.len()), gix_features::progress::count("indices"));
 
             // This could be parallelized… but it's probably not worth it unless you have 500mio objects.
@@ -129,7 +125,7 @@ impl multi_index::File {
             progress.show_throughput(start);
 
             let start = Instant::now();
-            progress.set_name("Deduplicate");
+            progress.set_name("Deduplicate".into());
             progress.init(Some(entries.len()), gix_features::progress::count("entries"));
             entries.sort_by(|l, r| {
                 l.id.cmp(&r.id)
@@ -168,7 +164,8 @@ impl multi_index::File {
             );
         }
 
-        let mut write_progress = progress.add_child_with_id("Writing multi-index", ProgressId::BytesWritten.into());
+        let mut write_progress =
+            progress.add_child_with_id("Writing multi-index".into(), ProgressId::BytesWritten.into());
         let write_start = Instant::now();
         write_progress.init(
             Some(cf.planned_storage_size() as usize + Self::HEADER_LEN),
@@ -187,19 +184,19 @@ impl multi_index::File {
         )?;
 
         {
-            progress.set_name("Writing chunks");
+            progress.set_name("Writing chunks".into());
             progress.init(Some(cf.num_chunks()), gix_features::progress::count("chunks"));
 
             let mut chunk_write = cf.into_write(&mut out, bytes_written)?;
             while let Some(chunk_to_write) = chunk_write.next_chunk() {
                 match chunk_to_write {
                     multi_index::chunk::index_names::ID => {
-                        multi_index::chunk::index_names::write(&index_filenames_sorted, &mut chunk_write)?
+                        multi_index::chunk::index_names::write(&index_filenames_sorted, &mut chunk_write)?;
                     }
                     multi_index::chunk::fanout::ID => multi_index::chunk::fanout::write(&entries, &mut chunk_write)?,
                     multi_index::chunk::lookup::ID => multi_index::chunk::lookup::write(&entries, &mut chunk_write)?,
                     multi_index::chunk::offsets::ID => {
-                        multi_index::chunk::offsets::write(&entries, num_large_offsets.is_some(), &mut chunk_write)?
+                        multi_index::chunk::offsets::write(&entries, num_large_offsets.is_some(), &mut chunk_write)?;
                     }
                     multi_index::chunk::large_offsets::ID => multi_index::chunk::large_offsets::write(
                         &entries,
@@ -220,14 +217,11 @@ impl multi_index::File {
         out.inner.inner.write_all(multi_index_checksum.as_slice())?;
         out.progress.show_throughput(write_start);
 
-        Ok(Outcome {
-            multi_index_checksum,
-            progress,
-        })
+        Ok(Outcome { multi_index_checksum })
     }
 
     fn write_header(
-        mut out: impl std::io::Write,
+        out: &mut dyn std::io::Write,
         num_chunks: u8,
         num_indices: u32,
         object_hash: gix_hash::Kind,

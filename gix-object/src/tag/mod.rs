@@ -1,3 +1,5 @@
+use winnow::prelude::*;
+
 use crate::TagRef;
 
 mod decode;
@@ -10,10 +12,12 @@ pub mod ref_iter;
 
 impl<'a> TagRef<'a> {
     /// Deserialize a tag from `data`.
-    pub fn from_bytes(data: &'a [u8]) -> Result<TagRef<'a>, crate::decode::Error> {
-        decode::git_tag(data)
-            .map(|(_, t)| t)
-            .map_err(crate::decode::Error::from)
+    pub fn from_bytes(mut data: &'a [u8]) -> Result<TagRef<'a>, crate::decode::Error> {
+        let input = &mut data;
+        match decode::git_tag.parse_next(input) {
+            Ok(tag) => Ok(tag),
+            Err(err) => Err(crate::decode::Error::with_err(err, input)),
+        }
     }
     /// The object this tag points to as `Id`.
     pub fn target(&self) -> gix_hash::ObjectId {

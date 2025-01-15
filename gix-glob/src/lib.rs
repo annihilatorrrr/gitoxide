@@ -1,10 +1,10 @@
 //! Provide glob [`Patterns`][Pattern] for matching against paths or anything else.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
@@ -14,7 +14,7 @@ use bstr::BString;
 ///
 /// For normal globbing, use [`wildmatch()`] instead.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Pattern {
     /// the actual pattern bytes
     pub text: BString,
@@ -26,6 +26,8 @@ pub struct Pattern {
 
 ///
 pub mod pattern;
+
+pub mod search;
 
 ///
 pub mod wildmatch;

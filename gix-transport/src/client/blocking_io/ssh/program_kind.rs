@@ -2,6 +2,8 @@ use std::{ffi::OsStr, io::ErrorKind};
 
 use bstr::{BString, ByteSlice, ByteVec};
 
+use gix_url::ArgumentSafety::*;
+
 use crate::{
     client::{ssh, ssh::ProgramKind},
     Protocol,
@@ -31,13 +33,12 @@ impl ProgramKind {
         if disallow_shell {
             prepare.use_shell = false;
         }
-        let host = url.host().expect("present in ssh urls");
         match self {
             ProgramKind::Ssh => {
                 if desired_version != Protocol::V1 {
                     prepare = prepare
                         .args(["-o", "SendEnv=GIT_PROTOCOL"])
-                        .env("GIT_PROTOCOL", format!("version={}", desired_version as usize))
+                        .env("GIT_PROTOCOL", format!("version={}", desired_version as usize));
                 }
                 if let Some(port) = url.port {
                     prepare = prepare.arg(format!("-p{port}"));
@@ -54,20 +55,28 @@ impl ProgramKind {
             }
             ProgramKind::Simple => {
                 if url.port.is_some() {
-                    return Err(ssh::invocation::Error {
+                    return Err(ssh::invocation::Error::Unsupported {
                         command: ssh_cmd.into(),
                         function: "setting the port",
                     });
                 }
             }
         };
-        let host_as_ssh_arg = match url.user() {
-            Some(user) => format!("{user}@{host}"),
-            None => host.into(),
+
+        let host_maybe_with_user_as_ssh_arg = match (url.user_as_argument(), url.host_as_argument()) {
+            (Usable(user), Usable(host)) => format!("{user}@{host}"),
+            (Usable(user), Dangerous(host)) => format!("{user}@{host}"), // The `user@` makes it safe.
+            (Absent, Usable(host)) => host.into(),
+            (Dangerous(user), _) => Err(ssh::invocation::Error::AmbiguousUserName { user: user.into() })?,
+            (_, Dangerous(host)) => Err(ssh::invocation::Error::AmbiguousHostName { host: host.into() })?,
+            (_, Absent) => panic!("BUG: host should always be present in SSH URLs"),
         };
 
-        // Try to force ssh to yield english messages (for parsing later)
-        Ok(prepare.arg(host_as_ssh_arg).env("LANG", "C").env("LC_ALL", "C"))
+        Ok(prepare
+            .arg(host_maybe_with_user_as_ssh_arg)
+            // Try to force ssh to yield English messages (for parsing later).
+            .env("LANG", "C")
+            .env("LC_ALL", "C"))
     }
 
     /// Note that the caller has to assure that the ssh program is launched in English by setting the locale.
@@ -107,7 +116,7 @@ impl ProgramKind {
 impl<'a> From<&'a OsStr> for ProgramKind {
     fn from(v: &'a OsStr) -> Self {
         let p = std::path::Path::new(v);
-        match p.file_stem().and_then(|s| s.to_str()) {
+        match p.file_stem().and_then(OsStr::to_str) {
             None => ProgramKind::Simple,
             Some(stem) => {
                 if stem.eq_ignore_ascii_case("ssh") {

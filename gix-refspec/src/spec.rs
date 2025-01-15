@@ -7,15 +7,15 @@ use crate::{
     Instruction, RefSpec, RefSpecRef,
 };
 
-/// Conversion. Use the [RefSpecRef][RefSpec::to_ref()] type for more usage options.
+/// Conversion. Use the [`RefSpecRef`][RefSpec::to_ref()] type for more usage options.
 impl RefSpec {
     /// Return ourselves as reference type.
     pub fn to_ref(&self) -> RefSpecRef<'_> {
         RefSpecRef {
             mode: self.mode,
             op: self.op,
-            src: self.src.as_ref().map(|b| b.as_ref()),
-            dst: self.dst.as_ref().map(|b| b.as_ref()),
+            src: self.src.as_ref().map(AsRef::as_ref),
+            dst: self.dst.as_ref().map(AsRef::as_ref),
         }
     }
 
@@ -41,13 +41,13 @@ mod impls {
 
     impl Hash for RefSpec {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.to_ref().hash(state)
+            self.to_ref().hash(state);
         }
     }
 
     impl Hash for RefSpecRef<'_> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.instruction().hash(state)
+            self.instruction().hash(state);
         }
     }
 
@@ -65,13 +65,13 @@ mod impls {
 
     impl PartialOrd for RefSpecRef<'_> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.instruction().partial_cmp(&other.instruction())
+            Some(self.cmp(other))
         }
     }
 
     impl PartialOrd for RefSpec {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.to_ref().partial_cmp(&other.to_ref())
+            Some(self.to_ref().cmp(&other.to_ref()))
         }
     }
 

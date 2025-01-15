@@ -1,11 +1,10 @@
-use std::{convert::TryInto, io, sync::atomic::AtomicBool};
+use std::{io, sync::atomic::AtomicBool};
 
 pub use error::Error;
-use gix_features::progress::{self, Progress};
+use gix_features::progress::{self, prodash::DynNestedProgress, Count, Progress};
 
 use crate::cache::delta::{traverse, Tree};
 
-pub(crate) mod encode;
 mod error;
 
 pub(crate) struct TreeEntry {
@@ -15,7 +14,7 @@ pub(crate) struct TreeEntry {
 
 /// Information gathered while executing [`write_data_iter_to_stream()`][crate::index::File::write_data_iter_to_stream]
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Outcome {
     /// The version of the verified index
     pub index_version: crate::index::Version,
@@ -79,39 +78,41 @@ impl crate::index::File {
     ///
     /// * neither in-pack nor out-of-pack Ref Deltas are supported here, these must have been resolved beforehand.
     /// * `make_resolver()` will only be called after the iterator stopped returning elements and produces a function that
-    /// provides all bytes belonging to a pack entry writing them to the given mutable output `Vec`.
-    /// It should return `None` if the entry cannot be resolved from the pack that produced the `entries` iterator, causing
-    /// the write operation to fail.
+    ///   provides all bytes belonging to a pack entry writing them to the given mutable output `Vec`.
+    ///   It should return `None` if the entry cannot be resolved from the pack that produced the `entries` iterator, causing
+    ///   the write operation to fail.
     #[allow(clippy::too_many_arguments)]
-    pub fn write_data_iter_to_stream<F, F2>(
+    pub fn write_data_iter_to_stream<F, F2, R>(
         version: crate::index::Version,
         make_resolver: F,
-        entries: impl Iterator<Item = Result<crate::data::input::Entry, crate::data::input::Error>>,
+        entries: &mut dyn Iterator<Item = Result<crate::data::input::Entry, crate::data::input::Error>>,
         thread_limit: Option<usize>,
-        mut root_progress: impl Progress,
-        out: impl io::Write,
+        root_progress: &mut dyn DynNestedProgress,
+        out: &mut dyn io::Write,
         should_interrupt: &AtomicBool,
         object_hash: gix_hash::Kind,
         pack_version: crate::data::Version,
     ) -> Result<Outcome, Error>
     where
-        F: FnOnce() -> io::Result<F2>,
-        F2: for<'r> Fn(crate::data::EntryRange, &'r mut Vec<u8>) -> Option<()> + Send + Clone,
+        F: FnOnce() -> io::Result<(F2, R)>,
+        R: Send + Sync,
+        F2: for<'r> Fn(crate::data::EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
     {
         if version != crate::index::Version::default() {
             return Err(Error::Unsupported(version));
         }
         let mut num_objects: usize = 0;
         let mut last_seen_trailer = None;
-        let anticipated_num_objects = entries.size_hint().1.unwrap_or_else(|| entries.size_hint().0);
-        let mut tree = Tree::with_capacity(anticipated_num_objects)?;
+        let (anticipated_num_objects, upper_bound) = entries.size_hint();
+        let worst_case_num_objects_after_thin_pack_resolution = upper_bound.unwrap_or(anticipated_num_objects);
+        let mut tree = Tree::with_capacity(worst_case_num_objects_after_thin_pack_resolution)?;
         let indexing_start = std::time::Instant::now();
 
         root_progress.init(Some(4), progress::steps());
-        let mut objects_progress = root_progress.add_child_with_id("indexing", ProgressId::IndexObjects.into());
-        objects_progress.init(entries.size_hint().1, progress::count("objects"));
+        let mut objects_progress = root_progress.add_child_with_id("indexing".into(), ProgressId::IndexObjects.into());
+        objects_progress.init(Some(anticipated_num_objects), progress::count("objects"));
         let mut decompressed_progress =
-            root_progress.add_child_with_id("decompressing", ProgressId::DecompressedBytes.into());
+            root_progress.add_child_with_id("decompressing".into(), ProgressId::DecompressedBytes.into());
         decompressed_progress.init(None, progress::bytes());
         let mut pack_entries_end: u64 = 0;
 
@@ -129,7 +130,7 @@ impl crate::index::File {
 
             decompressed_progress.inc_by(decompressed_size as usize);
 
-            let entry_len = header_size as u64 + compressed_size;
+            let entry_len = u64::from(header_size) + compressed_size;
             pack_entries_end = pack_offset + entry_len;
 
             let crc32 = crc32.expect("crc32 to be computed by the iterator. Caller assures correct configuration.");
@@ -168,11 +169,6 @@ impl crate::index::File {
             num_objects += 1;
             objects_progress.inc();
         }
-        if num_objects != anticipated_num_objects {
-            objects_progress.info(format!(
-                "{anticipated_num_objects} objects were resolved into {num_objects} objects during thin-pack resolution"
-            ));
-        }
         let num_objects: u32 = num_objects
             .try_into()
             .map_err(|_| Error::IteratorInvariantTooManyObjects(num_objects))?;
@@ -184,12 +180,12 @@ impl crate::index::File {
 
         root_progress.inc();
 
-        let resolver = make_resolver()?;
+        let (resolver, pack) = make_resolver()?;
         let sorted_pack_offsets_by_oid = {
             let traverse::Outcome { roots, children } = tree.traverse(
                 resolver,
+                &pack,
                 pack_entries_end,
-                || (),
                 |data,
                  _progress,
                  traverse::Context {
@@ -201,8 +197,11 @@ impl crate::index::File {
                     Ok::<_, Error>(())
                 },
                 traverse::Options {
-                    object_progress: root_progress.add_child_with_id("Resolving", ProgressId::ResolveObjects.into()),
-                    size_progress: root_progress.add_child_with_id("Decoding", ProgressId::DecodedBytes.into()),
+                    object_progress: Box::new(
+                        root_progress.add_child_with_id("Resolving".into(), ProgressId::ResolveObjects.into()),
+                    ),
+                    size_progress: &mut root_progress
+                        .add_child_with_id("Decoding".into(), ProgressId::DecodedBytes.into()),
                     thread_limit,
                     should_interrupt,
                     object_hash,
@@ -213,7 +212,8 @@ impl crate::index::File {
             let mut items = roots;
             items.extend(children);
             {
-                let _progress = root_progress.add_child_with_id("sorting by id", gix_features::progress::UNKNOWN);
+                let _progress =
+                    root_progress.add_child_with_id("sorting by id".into(), gix_features::progress::UNKNOWN);
                 items.sort_by_key(|e| e.data.id);
             }
 
@@ -231,12 +231,12 @@ impl crate::index::File {
             }
             None => return Err(Error::IteratorInvariantTrailer),
         };
-        let index_hash = encode::write_to(
+        let index_hash = crate::index::encode::write_to(
             out,
             sorted_pack_offsets_by_oid,
             &pack_hash,
             version,
-            root_progress.add_child_with_id("writing index file", ProgressId::IndexBytesWritten.into()),
+            &mut root_progress.add_child_with_id("writing index file".into(), ProgressId::IndexBytesWritten.into()),
         )?;
         root_progress.show_throughput_with(
             indexing_start,
@@ -254,14 +254,7 @@ impl crate::index::File {
 }
 
 fn modify_base(entry: &mut TreeEntry, pack_entry: &crate::data::Entry, decompressed: &[u8], hash: gix_hash::Kind) {
-    fn compute_hash(kind: gix_object::Kind, bytes: &[u8], object_hash: gix_hash::Kind) -> gix_hash::ObjectId {
-        let mut hasher = gix_features::hash::hasher(object_hash);
-        hasher.update(&gix_object::encode::loose_header(kind, bytes.len()));
-        hasher.update(bytes);
-        gix_hash::ObjectId::from(hasher.digest())
-    }
-
     let object_kind = pack_entry.header.as_kind().expect("base object as source of iteration");
-    let id = compute_hash(object_kind, decompressed, hash);
+    let id = gix_object::compute_hash(hash, object_kind, decompressed);
     entry.id = id;
 }

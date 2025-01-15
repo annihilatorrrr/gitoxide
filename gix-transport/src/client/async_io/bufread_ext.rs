@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_io::{AsyncBufRead, AsyncRead};
-use gix_packetline::PacketLineRef;
+use gix_packetline::{read::ProgressAction, PacketLineRef};
 
 use crate::{
     client::{Error, MessageKind},
@@ -15,7 +15,7 @@ use crate::{
 /// A function `f(is_error, text)` receiving progress or error information.
 /// As it is not a future itself, it must not block. If IO is performed within the function, be sure to spawn
 /// it onto an executor.
-pub type HandleProgress = Box<dyn FnMut(bool, &[u8])>;
+pub type HandleProgress<'a> = Box<dyn FnMut(bool, &[u8]) -> ProgressAction + 'a>;
 
 /// This trait exists to get a version of a `gix_packetline::Provider` without type parameters,
 /// but leave support for reading lines directly without forcing them through `String`.
@@ -34,15 +34,21 @@ pub trait ReadlineBufRead: AsyncBufRead {
     async fn readline(
         &mut self,
     ) -> Option<io::Result<Result<gix_packetline::PacketLineRef<'_>, gix_packetline::decode::Error>>>;
+
+    /// Read a line similar to `BufRead::read_line()`, but assure it doesn't try to find newlines
+    /// which might concatenate multiple distinct packet lines.
+    ///
+    /// Making this a trait method allows to handle differences between async and blocking.
+    async fn readline_str(&mut self, line: &mut String) -> io::Result<usize>;
 }
 
 /// Provide even more access to the underlying packet reader.
 #[async_trait(?Send)]
-pub trait ExtendedBufRead: ReadlineBufRead {
+pub trait ExtendedBufRead<'a>: ReadlineBufRead {
     /// Set the handler to which progress will be delivered.
     ///
     /// Note that this is only possible if packet lines are sent in side band mode.
-    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress>);
+    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress<'a>>);
     /// Peek the next data packet line. Maybe None if the next line is a packet we stop at, queryable using
     /// [`stopped_at()`][ExtendedBufRead::stopped_at()].
     async fn peek_data_line(&mut self) -> Option<io::Result<Result<&[u8], Error>>>;
@@ -54,16 +60,19 @@ pub trait ExtendedBufRead: ReadlineBufRead {
 }
 
 #[async_trait(?Send)]
-impl<'a, T: ReadlineBufRead + ?Sized + 'a + Unpin> ReadlineBufRead for Box<T> {
+impl<T: ReadlineBufRead + ?Sized + Unpin> ReadlineBufRead for Box<T> {
     async fn readline(&mut self) -> Option<io::Result<Result<PacketLineRef<'_>, gix_packetline::decode::Error>>> {
         self.deref_mut().readline().await
+    }
+    async fn readline_str(&mut self, line: &mut String) -> io::Result<usize> {
+        self.deref_mut().readline_str(line).await
     }
 }
 
 #[async_trait(?Send)]
-impl<'a, T: ExtendedBufRead + ?Sized + 'a + Unpin> ExtendedBufRead for Box<T> {
-    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress>) {
-        self.deref_mut().set_progress_handler(handle_progress)
+impl<'a, T: ExtendedBufRead<'a> + ?Sized + 'a + Unpin> ExtendedBufRead<'a> for Box<T> {
+    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress<'a>>) {
+        self.deref_mut().set_progress_handler(handle_progress);
     }
 
     async fn peek_data_line(&mut self) -> Option<io::Result<Result<&[u8], Error>>> {
@@ -71,7 +80,7 @@ impl<'a, T: ExtendedBufRead + ?Sized + 'a + Unpin> ExtendedBufRead for Box<T> {
     }
 
     fn reset(&mut self, version: Protocol) {
-        self.deref_mut().reset(version)
+        self.deref_mut().reset(version);
     }
 
     fn stopped_at(&self) -> Option<MessageKind> {
@@ -80,23 +89,31 @@ impl<'a, T: ExtendedBufRead + ?Sized + 'a + Unpin> ExtendedBufRead for Box<T> {
 }
 
 #[async_trait(?Send)]
-impl<T: AsyncRead + Unpin> ReadlineBufRead for gix_packetline::read::WithSidebands<'_, T, for<'b> fn(bool, &'b [u8])> {
+impl<T: AsyncRead + Unpin> ReadlineBufRead
+    for gix_packetline::read::WithSidebands<'_, T, for<'b> fn(bool, &'b [u8]) -> ProgressAction>
+{
     async fn readline(&mut self) -> Option<io::Result<Result<PacketLineRef<'_>, gix_packetline::decode::Error>>> {
         self.read_data_line().await
+    }
+    async fn readline_str(&mut self, line: &mut String) -> io::Result<usize> {
+        self.read_line_to_string(line).await
     }
 }
 
 #[async_trait(?Send)]
-impl<'a, T: AsyncRead + Unpin> ReadlineBufRead for gix_packetline::read::WithSidebands<'a, T, HandleProgress> {
+impl<'a, T: AsyncRead + Unpin> ReadlineBufRead for gix_packetline::read::WithSidebands<'a, T, HandleProgress<'a>> {
     async fn readline(&mut self) -> Option<io::Result<Result<PacketLineRef<'_>, gix_packetline::decode::Error>>> {
         self.read_data_line().await
+    }
+    async fn readline_str(&mut self, line: &mut String) -> io::Result<usize> {
+        self.read_line_to_string(line).await
     }
 }
 
 #[async_trait(?Send)]
-impl<'a, T: AsyncRead + Unpin> ExtendedBufRead for gix_packetline::read::WithSidebands<'a, T, HandleProgress> {
-    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress>) {
-        self.set_progress_handler(handle_progress)
+impl<'a, T: AsyncRead + Unpin> ExtendedBufRead<'a> for gix_packetline::read::WithSidebands<'a, T, HandleProgress<'a>> {
+    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress<'a>>) {
+        self.set_progress_handler(handle_progress);
     }
     async fn peek_data_line(&mut self) -> Option<io::Result<Result<&[u8], Error>>> {
         match self.peek_data_line().await {
@@ -108,7 +125,7 @@ impl<'a, T: AsyncRead + Unpin> ExtendedBufRead for gix_packetline::read::WithSid
     }
     fn reset(&mut self, version: Protocol) {
         match version {
-            Protocol::V1 => self.reset_with(&[gix_packetline::PacketLineRef::Flush]),
+            Protocol::V0 | Protocol::V1 => self.reset_with(&[gix_packetline::PacketLineRef::Flush]),
             Protocol::V2 => self.reset_with(&[
                 gix_packetline::PacketLineRef::Delimiter,
                 gix_packetline::PacketLineRef::Flush,

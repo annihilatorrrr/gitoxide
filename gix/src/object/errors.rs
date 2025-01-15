@@ -18,17 +18,33 @@ pub mod conversion {
 ///
 pub mod find {
     /// Indicate that an error occurred when trying to find an object.
-    pub type Error = gix_odb::store::find::Error;
+    #[derive(Debug, thiserror::Error)]
+    #[error(transparent)]
+    pub struct Error(#[from] pub gix_object::find::Error);
 
     ///
     pub mod existing {
         /// An object could not be found in the database, or an error occurred when trying to obtain it.
-        pub type Error = gix_odb::find::existing::Error<gix_odb::store::find::Error>;
+        pub type Error = gix_object::find::existing::Error;
+        ///
+        pub mod with_conversion {
+            /// The error returned by [Repository::find_commit()](crate::Repository::find_commit).
+            #[derive(Debug, thiserror::Error)]
+            #[allow(missing_docs)]
+            pub enum Error {
+                #[error(transparent)]
+                Find(#[from] crate::object::find::existing::Error),
+                #[error(transparent)]
+                Convert(#[from] crate::object::try_into::Error),
+            }
+        }
     }
 }
 
 ///
 pub mod write {
     /// An error to indicate writing to the loose object store failed.
-    pub type Error = gix_odb::store::write::Error;
+    #[derive(Debug, thiserror::Error)]
+    #[error(transparent)]
+    pub struct Error(#[from] pub gix_object::write::Error);
 }

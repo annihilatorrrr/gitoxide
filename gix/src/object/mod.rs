@@ -1,10 +1,9 @@
 //!
-use std::convert::TryInto;
-
+#![allow(clippy::empty_docs)]
 use gix_hash::ObjectId;
 pub use gix_object::Kind;
 
-use crate::{Commit, Id, Object, ObjectDetached, Tag, Tree};
+use crate::{Blob, Commit, Id, Object, ObjectDetached, Tag, Tree};
 
 mod errors;
 pub(crate) mod cache {
@@ -74,6 +73,14 @@ impl<'repo> Object<'repo> {
         }
     }
 
+    /// Transform this object into a blob, or panic if it is none.
+    pub fn into_blob(self) -> Blob<'repo> {
+        match self.try_into() {
+            Ok(blob) => blob,
+            Err(this) => panic!("Tried to use {} as blob, but was {}", this.id, this.kind),
+        }
+    }
+
     /// Transform this object into a tree, or panic if it is none.
     pub fn into_tree(self) -> Tree<'repo> {
         match self.try_into() {
@@ -87,6 +94,14 @@ impl<'repo> Object<'repo> {
         match self.try_into() {
             Ok(commit) => commit,
             Err(this) => panic!("Tried to use {} as commit, but was {}", this.id, this.kind),
+        }
+    }
+
+    /// Transform this object into a tag, or panic if it is none.
+    pub fn into_tag(self) -> Tag<'repo> {
+        match self.try_into() {
+            Ok(tag) => tag,
+            Err(this) => panic!("Tried to use {} as tag, but was {}", this.id, this.kind),
         }
     }
 
@@ -116,9 +131,18 @@ impl<'repo> Object<'repo> {
             expected: gix_object::Kind::Tree,
         })
     }
+
+    /// Transform this object into a blob, or return it as part of the `Err` if it is no blob.
+    pub fn try_into_blob(self) -> Result<Blob<'repo>, try_into::Error> {
+        self.try_into().map_err(|this: Self| try_into::Error {
+            id: this.id,
+            actual: this.kind,
+            expected: gix_object::Kind::Blob,
+        })
+    }
 }
 
-impl<'repo> Object<'repo> {
+impl Object<'_> {
     /// Create an owned instance of this object, copying our data in the process.
     pub fn detached(&self) -> ObjectDetached {
         ObjectDetached {
@@ -157,7 +181,7 @@ impl<'repo> Object<'repo> {
             })
     }
 
-    /// Obtain a an iterator over commit tokens like in [`to_commit_iter()`][Object::try_to_commit_ref_iter()].
+    /// Obtain an iterator over commit tokens like in [`to_commit_iter()`][Object::try_to_commit_ref_iter()].
     ///
     /// # Panic
     ///

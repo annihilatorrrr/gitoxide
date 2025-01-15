@@ -11,7 +11,7 @@ pub mod index_names {
     pub mod decode {
         use gix_object::bstr::BString;
 
-        /// The error returned by [from_bytes()][super::from_bytes()].
+        /// The error returned by [`from_bytes()`][super::from_bytes()].
         #[derive(Debug, thiserror::Error)]
         #[allow(missing_docs)]
         pub enum Error {
@@ -69,7 +69,7 @@ pub mod index_names {
                 ascii_path.is_ascii(),
                 "must use ascii bytes for correct size computation"
             );
-            count += (ascii_path.as_bytes().len() + 1/* null byte */) as u64
+            count += (ascii_path.len() + 1/* null byte */) as u64;
         }
 
         let needed_alignment = CHUNK_ALIGNMENT - (count % CHUNK_ALIGNMENT);
@@ -82,14 +82,14 @@ pub mod index_names {
     /// Write all `paths` in order to `out`, including padding.
     pub fn write(
         paths: impl IntoIterator<Item = impl AsRef<Path>>,
-        mut out: impl std::io::Write,
+        out: &mut dyn std::io::Write,
     ) -> std::io::Result<()> {
         let mut written_bytes = 0;
         for path in paths {
             let path = path.as_ref().to_str().expect("UTF-8 path");
             out.write_all(path.as_bytes())?;
             out.write_all(&[0])?;
-            written_bytes += path.as_bytes().len() as u64 + 1;
+            written_bytes += path.len() as u64 + 1;
         }
 
         let needed_alignment = CHUNK_ALIGNMENT - (written_bytes % CHUNK_ALIGNMENT);
@@ -105,8 +105,6 @@ pub mod index_names {
 
 /// Information for the chunk with the fanout table
 pub mod fanout {
-    use std::convert::TryInto;
-
     use crate::multi_index;
 
     /// The size of the fanout table
@@ -121,7 +119,7 @@ pub mod fanout {
             return None;
         }
         let mut out = [0; 256];
-        for (c, f) in chunk.chunks(4).zip(out.iter_mut()) {
+        for (c, f) in chunk.chunks_exact(4).zip(out.iter_mut()) {
             *f = u32::from_be_bytes(c.try_into().unwrap());
         }
         out.into()
@@ -130,9 +128,9 @@ pub mod fanout {
     /// Write the fanout for the given entries, which must be sorted by oid
     pub(crate) fn write(
         sorted_entries: &[multi_index::write::Entry],
-        mut out: impl std::io::Write,
+        out: &mut dyn std::io::Write,
     ) -> std::io::Result<()> {
-        let fanout = crate::index::write::encode::fanout(sorted_entries.iter().map(|e| e.id.first_byte()));
+        let fanout = crate::index::encode::fanout(&mut sorted_entries.iter().map(|e| e.id.first_byte()));
 
         for value in fanout.iter() {
             out.write_all(&value.to_be_bytes())?;
@@ -157,7 +155,7 @@ pub mod lookup {
 
     pub(crate) fn write(
         sorted_entries: &[multi_index::write::Entry],
-        mut out: impl std::io::Write,
+        out: &mut dyn std::io::Write,
     ) -> std::io::Result<()> {
         for entry in sorted_entries {
             out.write_all(entry.id.as_slice())?;
@@ -173,7 +171,7 @@ pub mod lookup {
 
 /// Information about the offsets table.
 pub mod offsets {
-    use std::{convert::TryInto, ops::Range};
+    use std::ops::Range;
 
     use crate::multi_index;
 
@@ -188,9 +186,9 @@ pub mod offsets {
     pub(crate) fn write(
         sorted_entries: &[multi_index::write::Entry],
         large_offsets_needed: bool,
-        mut out: impl std::io::Write,
+        out: &mut dyn std::io::Write,
     ) -> std::io::Result<()> {
-        use crate::index::write::encode::{HIGH_BIT, LARGE_OFFSET_THRESHOLD};
+        use crate::index::encode::{HIGH_BIT, LARGE_OFFSET_THRESHOLD};
         let mut num_large_offsets = 0u32;
 
         for entry in sorted_entries {
@@ -226,7 +224,7 @@ pub mod offsets {
 pub mod large_offsets {
     use std::ops::Range;
 
-    use crate::{index::write::encode::LARGE_OFFSET_THRESHOLD, multi_index};
+    use crate::{index::encode::LARGE_OFFSET_THRESHOLD, multi_index};
 
     /// The id uniquely identifying the large offsets table (with 64 bit offsets)
     pub const ID: gix_chunk::Id = *b"LOFF";
@@ -239,7 +237,7 @@ pub mod large_offsets {
             if entry.pack_offset > LARGE_OFFSET_THRESHOLD {
                 num_large_offsets += 1;
             }
-            if entry.pack_offset > u32::MAX as crate::data::Offset {
+            if entry.pack_offset > crate::data::Offset::from(u32::MAX) {
                 needs_large_offsets = true;
             }
         }
@@ -254,7 +252,7 @@ pub mod large_offsets {
     pub(crate) fn write(
         sorted_entries: &[multi_index::write::Entry],
         mut num_large_offsets: usize,
-        mut out: impl std::io::Write,
+        out: &mut dyn std::io::Write,
     ) -> std::io::Result<()> {
         for offset in sorted_entries
             .iter()

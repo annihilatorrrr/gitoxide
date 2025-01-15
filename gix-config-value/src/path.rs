@@ -51,8 +51,13 @@ pub mod interpolate {
     /// or any other error occurred.
     /// It can be used as `home_for_user` parameter in [`Path::interpolate()`][crate::Path::interpolate()].
     #[cfg_attr(windows, allow(unused_variables))]
+    #[cfg_attr(all(target_family = "wasm", not(target_os = "emscripten")), allow(unused_variables))]
     pub fn home_for_user(name: &str) -> Option<PathBuf> {
-        #[cfg(not(any(target_os = "android", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "windows",
+            all(target_family = "wasm", not(target_os = "emscripten"))
+        )))]
         {
             let cname = std::ffi::CString::new(name).ok()?;
             // SAFETY: calling this in a threaded program that modifies the pw database is not actually safe.
@@ -70,14 +75,18 @@ pub mod interpolate {
                 Some(std::ffi::OsStr::from_bytes(cstr.to_bytes()).into())
             }
         }
-        #[cfg(any(target_os = "android", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "android",
+            target_os = "windows",
+            all(target_family = "wasm", not(target_os = "emscripten"))
+        ))]
         {
             None
         }
     }
 }
 
-impl<'a> std::ops::Deref for Path<'a> {
+impl std::ops::Deref for Path<'_> {
     type Target = BStr;
 
     fn deref(&self) -> &Self::Target {
@@ -85,13 +94,13 @@ impl<'a> std::ops::Deref for Path<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for Path<'a> {
+impl AsRef<[u8]> for Path<'_> {
     fn as_ref(&self) -> &[u8] {
         self.value.as_ref()
     }
 }
 
-impl<'a> AsRef<BStr> for Path<'a> {
+impl AsRef<BStr> for Path<'_> {
     fn as_ref(&self) -> &BStr {
         self.value.as_ref()
     }
@@ -108,7 +117,7 @@ impl<'a> Path<'a> {
     ///
     /// If this path starts with `~/` or `~user/` or `%(prefix)/`
     ///  - `~/` is expanded to the value of `home_dir`. The caller can use the [dirs](https://crates.io/crates/dirs) crate to obtain it.
-    ///    It it is required but not set, an error is produced.
+    ///    If it is required but not set, an error is produced.
     ///  - `~user/` to the specified user’s home directory, e.g `~alice` might get expanded to `/home/alice` on linux, but requires
     ///    the `home_for_user` function to be provided.
     ///    The interpolation uses `getpwnam` sys call and is therefore not available on windows.

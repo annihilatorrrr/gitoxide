@@ -1,4 +1,4 @@
-use crate::{bstr, bstr::BStr, revision, Commit, ObjectDetached, Tree};
+use crate::{bstr, bstr::BStr, Commit, ObjectDetached, Tree};
 
 mod error {
     use crate::object;
@@ -20,7 +20,8 @@ mod error {
 
 pub use error::Error;
 
-impl<'repo> Commit<'repo> {
+/// Remove Lifetime
+impl Commit<'_> {
     /// Create an owned instance of this object, copying our data in the process.
     pub fn detached(&self) -> ObjectDetached {
         ObjectDetached {
@@ -33,6 +34,13 @@ impl<'repo> Commit<'repo> {
     /// Sever the connection to the `Repository` and turn this instance into a standalone object.
     pub fn detach(self) -> ObjectDetached {
         self.into()
+    }
+
+    /// Retrieve this instance's encoded data, leaving its own data empty.
+    ///
+    /// This method works around the immovability of members of this type.
+    pub fn take_data(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.data)
     }
 }
 
@@ -65,7 +73,7 @@ impl<'repo> Commit<'repo> {
     /// Decode the commit and obtain the time at which the commit was created.
     ///
     /// For the time at which it was authored, refer to `.decode()?.author.time`.
-    pub fn time(&self) -> Result<gix_actor::Time, Error> {
+    pub fn time(&self) -> Result<gix_date::Time, Error> {
         Ok(self.committer()?.time)
     }
 
@@ -109,7 +117,7 @@ impl<'repo> Commit<'repo> {
             .map(move |id| id.attach(repo))
     }
 
-    /// Parse the commit and return the the tree object it points to.
+    /// Parse the commit and return the tree object it points to.
     pub fn tree(&self) -> Result<Tree<'repo>, Error> {
         match self.tree_id()?.object()?.try_into_tree() {
             Ok(tree) => Ok(tree),
@@ -117,7 +125,7 @@ impl<'repo> Commit<'repo> {
         }
     }
 
-    /// Parse the commit and return the the tree id it points to.
+    /// Parse the commit and return the tree id it points to.
     pub fn tree_id(&self) -> Result<crate::Id<'repo>, gix_object::decode::Error> {
         gix_object::CommitRefIter::from_bytes(&self.data)
             .tree_id()
@@ -131,12 +139,13 @@ impl<'repo> Commit<'repo> {
     }
 
     /// Obtain a platform for traversing ancestors of this commit.
-    pub fn ancestors(&self) -> revision::walk::Platform<'repo> {
+    pub fn ancestors(&self) -> crate::revision::walk::Platform<'repo> {
         self.id().ancestors()
     }
 
     /// Create a platform to further configure a `git describe` operation to find a name for this commit by looking
     /// at the closest annotated tags (by default) in its past.
+    #[cfg(feature = "revision")]
     pub fn describe(&self) -> crate::commit::describe::Platform<'repo> {
         crate::commit::describe::Platform {
             id: self.id,
@@ -147,9 +156,18 @@ impl<'repo> Commit<'repo> {
             max_candidates: 10,
         }
     }
+
+    /// Extracts the PGP signature and the data that was used to create the signature, or `None` if it wasn't signed.
+    // TODO: make it possible to verify the signature, probably by wrapping `SignedData`. It's quite some work to do it properly.
+    pub fn signature(
+        &self,
+    ) -> Result<Option<(std::borrow::Cow<'_, BStr>, gix_object::commit::SignedData<'_>)>, gix_object::decode::Error>
+    {
+        gix_object::CommitRefIter::signature(&self.data)
+    }
 }
 
-impl<'r> std::fmt::Debug for Commit<'r> {
+impl std::fmt::Debug for Commit<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Commit({})", self.id)
     }

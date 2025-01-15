@@ -1,7 +1,7 @@
 //! # `gix_config`
 //!
-//! This crate is a high performance `gix-config` file reader and writer. It
-//! exposes a high level API to parse, read, and write [`gix-config` files].
+//! This crate is a high performance `git-config` file reader and writer. It
+//! exposes a high level API to parse, read, and write [`git-config` files].
 //!
 //! This crate has a few primary offerings and various accessory functions. The
 //! table below gives a brief explanation of all offerings, loosely in order
@@ -10,8 +10,8 @@
 //! | Offering      | Description                                         | Zero-copy?        |
 //! | ------------- | --------------------------------------------------- | ----------------- |
 //! | [`File`] | Accelerated wrapper for reading and writing values. | On some reads[^1] |
-//! | [`parse::State`]    | Syntactic events for `gix-config` files.     | Yes               |
-//! | value wrappers | Wrappers for `gix-config` value types.            | Yes               |
+//! | [`parse::State`]    | Syntactic events for `git-config` files.     | Yes               |
+//! | value wrappers | Wrappers for `git-config` value types.            | Yes               |
 //!
 //! This crate also exposes efficient value normalization which unescapes
 //! characters and removes quotes through the `normalize_*` family of functions,
@@ -24,17 +24,17 @@
 //!
 //! [^1]: When read values do not need normalization and it wasn't parsed in 'owned' mode.
 //!
-//! [`gix-config` files]: https://git-scm.com/docs/gix-config#_configuration_file
+//! [`git-config` files]: https://git-scm.com/docs/git-config#_configuration_file
 //! [`File`]: crate::File
 //! [`parse::State`]: crate::parse::Events
 //! [`nom`]: https://github.com/Geal/nom
 //!
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 pub mod file;
@@ -46,6 +46,8 @@ pub mod parse;
 pub mod value;
 pub use gix_config_value::{color, integer, path, Boolean, Color, Integer, Path};
 
+mod key;
+pub use key::{AsKey, KeyRef};
 mod types;
 pub use types::{File, Source};
 ///

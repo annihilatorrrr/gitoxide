@@ -1,4 +1,25 @@
 mod section {
+    use crate::parse::section::Header;
+    use crate::parse::{section, Comment, Event, Events, Section};
+    use bstr::BStr;
+    use std::borrow::Cow;
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn size_of_events() {
+        assert_eq!(
+            std::mem::size_of::<Section<'_>>(),
+            96,
+            "this value should only ever decrease"
+        );
+        assert_eq!(std::mem::size_of::<Events<'_>>(), 616);
+        assert_eq!(std::mem::size_of::<Event<'_>>(), 72);
+        assert_eq!(std::mem::size_of::<Header<'_>>(), 72);
+        assert_eq!(std::mem::size_of::<Comment<'_>>(), 32);
+        assert_eq!(std::mem::size_of::<Option<Cow<'_, BStr>>>(), 24);
+        assert_eq!(std::mem::size_of::<section::Name<'_>>(), 24);
+        assert_eq!(std::mem::size_of::<section::ValueName<'_>>(), 24);
+    }
 
     mod header {
         mod unvalidated {
@@ -89,13 +110,9 @@ pub(crate) mod util {
     //! This module is only included for tests, and contains common unit test helper
     //! functions.
 
-    use std::{borrow::Cow, convert::TryFrom};
+    use std::borrow::Cow;
 
     use crate::parse::{section, Comment, Event};
-
-    pub fn into_events(events: Vec<Event<'_>>) -> section::Events<'_> {
-        events.into()
-    }
 
     pub fn section_header(
         name: &str,
@@ -118,7 +135,7 @@ pub(crate) mod util {
     }
 
     pub(crate) fn name_event(name: &'static str) -> Event<'static> {
-        Event::SectionKey(section::Key(Cow::Borrowed(name.into())))
+        Event::SectionValueName(section::ValueName(Cow::Borrowed(name.into())))
     }
 
     pub(crate) fn value_event(value: &'static str) -> Event<'static> {

@@ -1,22 +1,25 @@
 use std::{io::BufWriter, path::PathBuf, sync::atomic::AtomicBool};
 
 use anyhow::bail;
-
-use gix::Progress;
+use gix::NestedProgress;
 
 use crate::OutputFormat;
 
 pub const PROGRESS_RANGE: std::ops::RangeInclusive<u8> = 1..=3;
 
-pub fn verify(multi_index_path: PathBuf, progress: impl Progress, should_interrupt: &AtomicBool) -> anyhow::Result<()> {
-    gix::odb::pack::multi_index::File::at(multi_index_path)?.verify_integrity_fast(progress, should_interrupt)?;
+pub fn verify(
+    multi_index_path: PathBuf,
+    mut progress: impl NestedProgress + 'static,
+    should_interrupt: &AtomicBool,
+) -> anyhow::Result<()> {
+    gix::odb::pack::multi_index::File::at(multi_index_path)?.verify_integrity_fast(&mut progress, should_interrupt)?;
     Ok(())
 }
 
 pub fn create(
     index_paths: Vec<PathBuf>,
     output_path: PathBuf,
-    progress: impl Progress,
+    mut progress: impl NestedProgress + 'static,
     should_interrupt: &AtomicBool,
     object_hash: gix::hash::Kind,
 ) -> anyhow::Result<()> {
@@ -28,7 +31,7 @@ pub fn create(
     gix::odb::pack::multi_index::File::write_from_index_paths(
         index_paths,
         &mut out,
-        progress,
+        &mut progress,
         should_interrupt,
         gix::odb::pack::multi_index::write::Options { object_hash },
     )?;
@@ -36,7 +39,7 @@ pub fn create(
     Ok(())
 }
 
-#[cfg(feature = "serde1")]
+#[cfg(feature = "serde")]
 mod info {
     use std::path::PathBuf;
 
@@ -49,7 +52,7 @@ mod info {
     }
 }
 
-#[cfg_attr(not(feature = "serde1"), allow(unused_variables))]
+#[cfg_attr(not(feature = "serde"), allow(unused_variables))]
 pub fn info(
     multi_index_path: PathBuf,
     format: OutputFormat,
@@ -59,7 +62,7 @@ pub fn info(
     if format == OutputFormat::Human {
         writeln!(err, "Defaulting to JSON as human format isn't implemented").ok();
     }
-    #[cfg(feature = "serde1")]
+    #[cfg(feature = "serde")]
     {
         let file = gix::odb::pack::multi_index::File::at(&multi_index_path)?;
         serde_json::to_writer_pretty(
@@ -79,7 +82,7 @@ pub fn entries(multi_index_path: PathBuf, format: OutputFormat, mut out: impl st
     if format != OutputFormat::Human {
         bail!("Only human format is supported right now");
     }
-    let file = gix::odb::pack::multi_index::File::at(&multi_index_path)?;
+    let file = gix::odb::pack::multi_index::File::at(multi_index_path)?;
     for entry in file.iter() {
         writeln!(out, "{} {} {}", entry.oid, entry.pack_index, entry.pack_offset)?;
     }

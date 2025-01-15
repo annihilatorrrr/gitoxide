@@ -2,170 +2,455 @@ name: ci
 
 on:
   push:
-    branches: [ main ]
-    tags-ignore: [ '*' ]
-    paths:
-      - '.github/**'
-      - 'ci/**'
-      - 'etc/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'cargo-*/**'
-      - 'gix*/**'
-      - '*.toml'
-      - Makefile
+    branches:
+      - main
+      - 'run-ci/**'
+      - '**/run-ci/**'
+    tags-ignore:
+      - '*'
   pull_request:
-    branches: [ main ]
-    paths:
-      - '.github/**'
-      - 'ci/**'
-      - 'etc/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'cargo-*/**'
-      - 'gix*/**'
-      - '*.toml'
-      - Makefile
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CLICOLOR: '1'
 
 jobs:
   pure-rust-build:
     runs-on: ubuntu-latest
-    container: debian:buster
+
+    container: debian:stable-slim
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v4
       - name: Prerequisites
-        run: apt-get update && apt-get install --no-install-recommends -y ca-certificates curl gcc libc-dev # gcc is required as OS abstraction
-      - name: install Rust via Rustup
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal;
-      - run: /github/home/.cargo/bin/cargo build --no-default-features --features max-pure
+        run: |
+          prerequisites=(
+            ca-certificates
+            curl
+            gcc  # rustc calls gcc to invoke the linker.
+            libc-dev  # rustc, in the toolchain we are using, dynamically links to the system libc.
+          )
+          apt-get update
+          apt-get install --no-install-recommends -y -- "${prerequisites[@]}"
+        shell: bash
+      - name: Verify that we are in an environment with limited dev tools
+        run: |
+          set -x
+          for package in cmake g++ libssl-dev make pkgconf pkg-config; do
+            if dpkg-query --status -- "$package"; then
+              exit 1
+            fi
+          done
+          for cmd in cmake g++ make pkgconf pkg-config; do
+            if command -v -- "$cmd"; then
+              exit 1
+            fi
+          done
+      - name: Install Rust via Rustup
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - name: Add Rust tools to path
+        run: echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
+      - name: Generate dependency tree
+        run: cargo tree --locked --no-default-features --features max-pure > tree.txt
+      - name: Scan for dependencies that build C or C++ code
+        run: |
+          pattern='.*\b(-sys|cc|cmake|pkg-config|vcpkg)\b.*'
+          ! GREP_COLORS='ms=30;48;5;214' grep --color=always -Ex -C 1000000 -e "$pattern" tree.txt
+        continue-on-error: true
+      - name: Check for unrecognized *-sys dependencies
+        run: |
+          ! grep -qP '(?<!\blinux-raw)-sys\b' tree.txt
+      - name: Wrap cc1 (and cc1plus if present) to record calls
+        run: |
+          cat >/usr/local/bin/wrapper1 <<'EOF'
+          #!/bin/sh -e
+          printf '%s\n' "$0 $*" |
+            flock /run/lock/wrapper1.fbd136bd-9b1b-448d-84a9-e18be53ae63c.lock \
+            tee -a -- /var/log/wrapper1.log ~/display >/dev/null  # We'll link ~/display later.
+          exec "$0.orig" "$@"
+          EOF
+
+          cat >/usr/local/bin/wrap1 <<'EOF'
+          #!/bin/sh -e
+          dir="$(dirname -- "$1")"
+          base="$(basename -- "$1")"
+          cd -- "$dir"
+          mv -- "$base" "$base.orig"
+          ln -s -- /usr/local/bin/wrapper1 "$base"
+          EOF
+
+          chmod +x /usr/local/bin/wrap1 /usr/local/bin/wrapper1
+          mkdir /run/lock/wrapper1.fbd136bd-9b1b-448d-84a9-e18be53ae63c.lock
+
+          find /usr/lib/gcc \( -name cc1 -o -name cc1plus \) \
+            -print -exec /usr/local/bin/wrap1 {} \;
+      - name: Build max-pure with limited dev tools and log cc1
+        run: |
+          ln -s -- "/proc/$$/fd/1" ~/display  # Bypass `cc1` redirection.
+          cargo install --debug --locked --no-default-features --features max-pure --path .
+      - name: Show logged C and C++ compilations (should be none)
+        run: |
+          ! cat /var/log/wrapper1.log
+        continue-on-error: true
 
   test:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v3
-    - uses: Swatinem/rust-cache@v2
-    - name: Setup dependencies
-      run:
-        sudo apt-get install tree
-    - name: test
-      env:
-        CI: true
-      run: make tests-ci
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup dependencies
+        run: sudo apt-get install -y --no-install-recommends liblzma-dev
+      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: test
+        env:
+          GIX_TEST_IGNORE_ARCHIVES: '1'
+        run: just ci-test
+
+  test-journey:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - name: Run journey tests
+        run: just ci-journey-tests
 
   test-fast:
     strategy:
       matrix:
         os:
-          - windows-2019
+          - windows-latest
           - macos-latest
+          - ubuntu-latest
+
     runs-on: ${{ matrix.os }}
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Setup dependencies (macos)
         if: startsWith(matrix.os, 'macos')
-        run:
-          brew install tree openssl gnu-sed
-      - name: "cargo check default features"
+        run: brew install openssl gnu-sed
+      - name: cargo check default features
         if: startsWith(matrix.os, 'windows')
-        run: cargo check --all --bins --examples
-      - run: git lfs fetch && git lfs checkout
-      - uses: taiki-e/install-action@v1
+        run: cargo check --workspace --bins --examples
+      - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-          version: 0.9
-      - name: "Test (nextest)"
-        run: cargo nextest run --all --no-fail-fast
+      - name: Test (nextest)
+        env:
+          GIX_TEST_CREATE_ARCHIVES_EVEN_ON_CI: '1'
+        run: cargo nextest run --workspace --no-fail-fast
+      - name: Doctest
+        run: cargo test --workspace --doc --no-fail-fast
+      - name: Check that tracked archives are up to date
+        run: git diff --exit-code  # If this fails, the fix is usually to commit a regenerated archive.
 
-  installation:
+  test-fixtures-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Test (nextest)
+        id: nextest
+        env:
+          GIX_TEST_IGNORE_ARCHIVES: '1'
+        run: cargo nextest --profile=with-xml run --workspace --no-fail-fast
+        continue-on-error: true
+      - name: Check for errors
+        run: |
+          [xml]$junit_xml = Get-Content -Path 'target/nextest/with-xml/junit.xml'
+          if ($junit_xml.testsuites.errors -ne 0) { exit 1 }
+      - name: Collect actual failures
+        run: |
+          [xml]$junit_xml = Get-Content -Path 'target/nextest/with-xml/junit.xml'
+
+          $actual_failures = $junit_xml.SelectNodes("//testcase[failure]") |
+            ForEach-Object { "$($_.classname) $($_.name)" } |
+            Sort-Object
+
+          Write-Output $actual_failures
+          Set-Content -Path 'actual-failures.txt' -Value $actual_failures
+      - name: Compare expected and actual failures
+        run: |
+          # Fail on any differences, even unexpectedly passing tests, so they can be investigated.
+          # (If the job is made blocking for PRs, it may make sense to make this less stringent.)
+          git --no-pager diff --no-index --exit-code --unified=1000000 --color=always -- `
+            etc/test-fixtures-windows-expected-failures-see-issue-1358.txt actual-failures.txt
+
+  test-32bit:
+    runs-on: ubuntu-latest
+
+    container: i386/debian:stable-slim
+
+    steps:
+      - name: Prerequisites
+        run: |
+          prerequisites=(
+            build-essential
+            ca-certificates
+            cmake
+            curl
+            git
+            jq
+            libssl-dev
+            libstdc++6:amd64  # To support external 64-bit Node.js for actions.
+            pkgconf
+          )
+          dpkg --add-architecture amd64
+          apt-get update
+          apt-get install --no-install-recommends -y -- "${prerequisites[@]}"
+        shell: bash
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-i686-unknown-linux-gnu  # Otherwise it may misdetect based on the amd64 kernel.
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Make `system` scope nonempty for "GitInstallation" tests
+        run: git config --system gitoxide.imaginary.arbitraryVariable arbitraryValue
+      - name: Test (nextest)
+        env:
+          GIX_TEST_IGNORE_ARCHIVES: '1'
+        run: cargo nextest run --workspace --no-fail-fast
+
+  test-32bit-cross:
+    runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        build: [ win-msvc, win-gnu, win32-msvc ]
-        include:
-          - build: win-msvc
-            os: windows-2019
-            rust: stable
-            target: x86_64-pc-windows-msvc
-          - build: win-gnu
-            os: windows-2019
-            rust: stable-x86_64-gnu
-            target: x86_64-pc-windows-gnu
-          - build: win32-msvc
-            os: windows-2019
-            rust: stable
-            target: i686-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+        target: [ armv7-linux-androideabi ]
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: "Install prerequisites"
-        run: vcpkg install  zlib:x64-windows-static-md
-      - name: "Installation from crates.io: gitoxide"
-        run: cargo +${{ matrix.rust }} install --target ${{ matrix.target }} --target-dir install-artifacts --debug --force gitoxide
-      - name: "Installation from crates.io: cargo-smart-release"
-        run: cargo +${{ matrix.rust }} install --target ${{ matrix.target }} --target-dir install-artifacts --debug --force cargo-smart-release
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: check
+        run: cross check -p gix --target ${{ matrix.target }}
+      - name: Test (unit)
+        run: |
+          # Run some high-level unit tests that exercise various pure Rust code to ease building test binaries.
+          # We would prefer `-p gix`. But with `cross`, fixture scripts try to run amd64 `git` as an armv7 binary.
+          cross test -p gix-hashtable --target ${{ matrix.target }}
 
   lint:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.65 # clippy is broken for us in 1.66
+          toolchain: stable
           components: clippy,rustfmt
+      - uses: extractions/setup-just@v2
       - name: Run cargo clippy
-        run: make clippy
+        run: just clippy -D warnings -A unknown-lints --no-deps
+      - name: Run cargo doc
+        run: just doc
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
-      - name: Run cargo diet
+      - name: Install cargo diet
+        env:
+          CARGO_DIET_TAG: v1.2.7
         run: |
-          curl -LSfs https://raw.githubusercontent.com/the-lean-crate/cargo-diet/master/ci/install.sh | \
-           sh -s -- --git the-lean-crate/cargo-diet --target x86_64-unknown-linux-musl --tag v1.2.4
+          curl -LSfs "https://raw.githubusercontent.com/the-lean-crate/cargo-diet/refs/tags/$CARGO_DIET_TAG/ci/install.sh" |
+            sh -s -- --git the-lean-crate/cargo-diet --target x86_64-unknown-linux-musl --tag "$CARGO_DIET_TAG"
+      - name: Run cargo diet
+        run: just check-size
+        # Let's not fail CI for this, it will fail locally often enough, and a crate a little bigger
+        # than allows is no problem either if it comes to that.
+        continue-on-error: true
 
-          # Let's not fail CI for this, it will fail locally often enough, and a crate a little bigger
-          # than allows is no problem either if it comes to that.
-          make check-size || true
+  # This job is not required for PR auto-merge, so that sudden announcement of a
+  # new advisory does not keep otherwise OK pull requests from being integrated.
+  cargo-deny-advisories:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
 
   cargo-deny:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        checks:
-          - advisories
-          - bans licenses sources
-
-    # Prevent sudden announcement of a new advisory from failing ci:
-    continue-on-error: ${{ matrix.checks == 'advisories' }}
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: EmbarkStudios/cargo-deny-action@v1
-      with:
-        command: check ${{ matrix.checks }}
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
+
   wasm:
     name: WebAssembly
+
     runs-on: ubuntu-latest
-    continue-on-error: true
+
     strategy:
       matrix:
-        target: [ wasm32-unknown-unknown, wasm32-wasi ]
+        target: [ wasm32-unknown-unknown, wasm32-wasip1 ]
+
+    env:
+      TARGET: ${{ matrix.target }}
+
     steps:
-      - uses: actions/checkout@master
+      - uses: actions/checkout@v4
       - name: Install Rust
-        run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add "$TARGET"
       - uses: Swatinem/rust-cache@v2
-      - run: set +x; for name in gix-actor gix-attributes gix-bitmap gix-chunk gix-command gix-commitgraph gix-date gix-glob gix-hash gix-hashtable gix-mailmap gix-object gix-packetline gix-path gix-pathspec gix-quote gix-refspec gix-revision gix-traverse gix-validate; do (cd $name && cargo build --target ${{ matrix.target }}); done
-        name: crates without feature toggles
-      - run: set +x; for feature in progress fs-walkdir-parallel parallel io-pipe crc32 zlib zlib-rust-backend fast-sha1 rustsha1 cache-efficiency-debug; do (cd gix-features && cargo build --features $feature --target ${{ matrix.target }}); done
-        name: features of gix-features
-      - run: set +x; for name in gix-diff gix-pack; do (cd $name && cargo build --features wasm --target ${{ matrix.target }}); done
-        name: crates with 'wasm' feature
-      - run: cd gix-pack && cargo build --all-features --target ${{ matrix.target }}
-        name: gix-pack with all features (including wasm)
+      - name: 'WASI only: crates without feature toggle'
+        if: endsWith(matrix.target, '-wasi')
+        run: |
+          set +x
+          for name in gix-sec; do
+            (cd -- "$name" && cargo build --target "$TARGET")
+          done
+      - name: crates without feature toggles
+        run: |
+          set +x
+          for name in gix-actor gix-attributes gix-bitmap gix-chunk gix-command gix-commitgraph gix-config-value gix-date gix-glob gix-hash gix-hashtable gix-mailmap gix-object gix-packetline gix-path gix-pathspec gix-prompt gix-quote gix-refspec gix-revision gix-traverse gix-url gix-validate; do
+            (cd -- "$name" && cargo build --target "$TARGET")
+          done
+      - name: features of gix-features
+        run: |
+          set +x
+          for feature in progress fs-walkdir-parallel parallel io-pipe crc32 zlib zlib-rust-backend fast-sha1 rustsha1 cache-efficiency-debug; do
+            (cd gix-features && cargo build --features "$feature" --target "$TARGET")
+          done
+      - name: crates with 'wasm' feature
+        run: |
+          set +x
+          for name in gix-pack; do
+            (cd -- "$name" && cargo build --features wasm --target "$TARGET")
+          done
+      - name: gix-pack with all features (including wasm)
+        run: cd gix-pack && cargo build --all-features --target "$TARGET"
+
+  check-packetline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          # We consider this script read-only and its effect is the same everywhere.
+          # However, when changes are made to `etc/copy-packetline.sh`, re-enable the other platforms for testing.
+    #       - macos-latest
+    #       - windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash  # Use bash even on Windows, if we ever reenable windows-latest for testing.
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that working tree is initially clean
+        run: |
+          set -x
+          git status
+          git diff --exit-code
+      - name: Regenerate gix-packetline-blocking/src
+        run: etc/copy-packetline.sh
+      - name: Check that gix-packetline-blocking/src was already up to date
+        run: |
+          set -x
+          git status
+          git diff --exit-code
+
+  # Check that only jobs intended not to block PR auto-merge are omitted as
+  # dependencies of the `tests-pass` job below, so that whenever a job is
+  # added, a decision is made about whether it must pass for PRs to merge.
+  check-blocking:
+    runs-on: ubuntu-latest
+
+    env:
+      # List all jobs that are intended NOT to block PR auto-merge here.
+      EXPECTED_NONBLOCKING_JOBS: |-
+        test-fixtures-windows
+        cargo-deny-advisories
+        wasm
+        tests-pass
+
+    defaults:
+      run:
+        shell: bash  # Without specifying this, we don't get `-o pipefail`.
+
+    steps:
+      - name: Find this workflow
+        run: |
+          relative_workflow_with_ref="${GITHUB_WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"
+          echo "WORKFLOW_PATH=${relative_workflow_with_ref%@*}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: ${{ env.WORKFLOW_PATH }}
+      - name: Get all jobs
+        run: yq '.jobs | keys.[]' -- "$WORKFLOW_PATH" | sort | tee all-jobs.txt
+      - name: Get blocking jobs
+        run: yq '.jobs.tests-pass.needs.[]' -- "$WORKFLOW_PATH" | sort | tee blocking-jobs.txt
+      - name: Get jobs we intend do not block
+        run: sort <<<"$EXPECTED_NONBLOCKING_JOBS" | tee expected-nonblocking-jobs.txt
+      - name: Each job must block PRs or be declared not to
+        run: |
+          sort -m blocking-jobs.txt expected-nonblocking-jobs.txt |
+            diff --color=always -U1000 - all-jobs.txt
+
+  # Dummy job to have a stable name for the "all tests pass" requirement
+  tests-pass:
+    name: Tests pass
+
+    needs:
+      - pure-rust-build
+      - test
+      - test-journey
+      - test-fast
+      - test-32bit
+      - test-32bit-cross
+      - lint
+      - cargo-deny
+      - check-packetline
+      - check-blocking
+
+    if: always() # always run even if dependencies fail
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fail if ANY dependency has failed or cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: OK
+        run: exit 0

@@ -4,7 +4,7 @@ use crate::{color, integer};
 /// collection of color (text) modifiers, or a combination of any of the
 /// aforementioned values, like `red` or `brightgreen`.
 ///
-/// Note that `gix-config` allows color values to simply be a collection of
+/// Note that `git-config` allows color values to simply be a collection of
 /// [`color::Attribute`]s, and does not require a [`color::Name`] for either the
 /// foreground or background color.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
@@ -24,7 +24,7 @@ pub struct Color {
 /// wish to obtain the true value of the integer, you must account for the
 /// suffix after fetching the value. [`integer::Suffix`] provides
 /// [`bitwise_offset()`][integer::Suffix::bitwise_offset] to help with the
-/// math, or [to_decimal()][Integer::to_decimal()] for obtaining a usable value in one step.
+/// math, or [`to_decimal()`][Integer::to_decimal()] for obtaining a usable value in one step.
 #[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct Integer {
     /// The value, without any suffix modification

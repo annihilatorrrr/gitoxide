@@ -1,6 +1,6 @@
-use bstr::{BStr, BString, ByteSlice};
-
+use crate::fetch::response::ShallowUpdate;
 use crate::handshake::{refs::parse::Error, Ref};
+use bstr::{BStr, BString, ByteSlice};
 
 impl From<InternalRef> for Ref {
     fn from(v: InternalRef) -> Self {
@@ -8,18 +8,31 @@ impl From<InternalRef> for Ref {
             InternalRef::Symbolic {
                 path,
                 target: Some(target),
+                tag,
                 object,
             } => Ref::Symbolic {
                 full_ref_name: path,
                 target,
+                tag,
                 object,
             },
             InternalRef::Symbolic {
                 path,
                 target: None,
+                tag: None,
                 object,
             } => Ref::Direct {
                 full_ref_name: path,
+                object,
+            },
+            InternalRef::Symbolic {
+                path,
+                target: None,
+                tag: Some(tag),
+                object,
+            } => Ref::Peeled {
+                full_ref_name: path,
+                tag,
                 object,
             },
             InternalRef::Peeled { path, tag, object } => Ref::Peeled {
@@ -56,6 +69,7 @@ pub(crate) enum InternalRef {
         ///
         /// The latter is more of an edge case, please [this issue][#205] for details.
         target: Option<BString>,
+        tag: Option<gix_hash::ObjectId>,
         object: gix_hash::ObjectId,
     },
     /// extracted from V1 capabilities, which contain some important symbolic refs along with their targets
@@ -101,7 +115,7 @@ pub(crate) fn from_capabilities<'a>(
                 b"(null)" => None,
                 name => Some(name.into()),
             },
-        })
+        });
     }
     Ok(out_refs)
 }
@@ -109,6 +123,7 @@ pub(crate) fn from_capabilities<'a>(
 pub(in crate::handshake::refs) fn parse_v1(
     num_initial_out_refs: usize,
     out_refs: &mut Vec<InternalRef>,
+    out_shallow: &mut Vec<ShallowUpdate>,
     line: &BStr,
 ) -> Result<(), Error> {
     let trimmed = line.trim_end();
@@ -123,6 +138,10 @@ pub(in crate::handshake::refs) fn parse_v1(
     }
     match path.strip_suffix(b"^{}") {
         Some(stripped) => {
+            if hex_hash.iter().all(|b| *b == b'0') && stripped == b"capabilities" {
+                // this is a special dummy-ref just for the sake of getting capabilities across in a repo that is empty.
+                return Ok(());
+            }
             let (previous_path, tag) =
                 out_refs
                     .pop()
@@ -142,7 +161,15 @@ pub(in crate::handshake::refs) fn parse_v1(
             });
         }
         None => {
-            let object = gix_hash::ObjectId::from_hex(hex_hash.as_bytes())?;
+            let object = match gix_hash::ObjectId::from_hex(hex_hash.as_bytes()) {
+                Ok(id) => id,
+                Err(_) if hex_hash.as_bstr() == "shallow" => {
+                    let id = gix_hash::ObjectId::from_hex(path)?;
+                    out_shallow.push(ShallowUpdate::Shallow(id));
+                    return Ok(());
+                }
+                Err(err) => return Err(err.into()),
+            };
             match out_refs
                 .iter()
                 .take(num_initial_out_refs)
@@ -151,6 +178,7 @@ pub(in crate::handshake::refs) fn parse_v1(
                 Some(position) => match out_refs.swap_remove(position) {
                     InternalRef::SymbolicForLookup { path: _, target } => out_refs.push(InternalRef::Symbolic {
                         path: path.into(),
+                        tag: None, // TODO: figure out how annotated tags work here.
                         object,
                         target,
                     }),
@@ -168,7 +196,7 @@ pub(in crate::handshake::refs) fn parse_v1(
 
 pub(in crate::handshake::refs) fn parse_v2(line: &BStr) -> Result<Ref, Error> {
     let trimmed = line.trim_end();
-    let mut tokens = trimmed.splitn(3, |b| *b == b' ');
+    let mut tokens = trimmed.splitn(4, |b| *b == b' ');
     match (tokens.next(), tokens.next()) {
         (Some(hex_hash), Some(path)) => {
             let id = if hex_hash == b"unborn" {
@@ -179,7 +207,9 @@ pub(in crate::handshake::refs) fn parse_v2(line: &BStr) -> Result<Ref, Error> {
             if path.is_empty() {
                 return Err(Error::MalformedV2RefLine(trimmed.to_owned().into()));
             }
-            Ok(if let Some(attribute) = tokens.next() {
+            let mut symref_target = None;
+            let mut peeled = None;
+            for attribute in tokens.by_ref().take(2) {
                 let mut tokens = attribute.splitn(2, |b| *b == b':');
                 match (tokens.next(), tokens.next()) {
                     (Some(attribute), Some(value)) => {
@@ -187,32 +217,12 @@ pub(in crate::handshake::refs) fn parse_v2(line: &BStr) -> Result<Ref, Error> {
                             return Err(Error::MalformedV2RefLine(trimmed.to_owned().into()));
                         }
                         match attribute {
-                            b"peeled" => Ref::Peeled {
-                                full_ref_name: path.into(),
-                                object: gix_hash::ObjectId::from_hex(value.as_bytes())?,
-                                tag: id.ok_or(Error::InvariantViolation {
-                                    message: "got 'unborn' as tag target",
-                                })?,
-                            },
-                            b"symref-target" => match value {
-                                b"(null)" => Ref::Direct {
-                                    full_ref_name: path.into(),
-                                    object: id.ok_or(Error::InvariantViolation {
-                                        message: "got 'unborn' while (null) was a symref target",
-                                    })?,
-                                },
-                                name => match id {
-                                    Some(id) => Ref::Symbolic {
-                                        full_ref_name: path.into(),
-                                        object: id,
-                                        target: name.into(),
-                                    },
-                                    None => Ref::Unborn {
-                                        full_ref_name: path.into(),
-                                        target: name.into(),
-                                    },
-                                },
-                            },
+                            b"peeled" => {
+                                peeled = Some(gix_hash::ObjectId::from_hex(value.as_bytes())?);
+                            }
+                            b"symref-target" => {
+                                symref_target = Some(value);
+                            }
                             _ => {
                                 return Err(Error::UnknownAttribute {
                                     attribute: attribute.to_owned().into(),
@@ -223,15 +233,90 @@ pub(in crate::handshake::refs) fn parse_v2(line: &BStr) -> Result<Ref, Error> {
                     }
                     _ => return Err(Error::MalformedV2RefLine(trimmed.to_owned().into())),
                 }
-            } else {
-                Ref::Direct {
+            }
+            if tokens.next().is_some() {
+                return Err(Error::MalformedV2RefLine(trimmed.to_owned().into()));
+            }
+            Ok(match (symref_target, peeled) {
+                (Some(target_name), peeled) => match target_name {
+                    b"(null)" => match peeled {
+                        None => Ref::Direct {
+                            full_ref_name: path.into(),
+                            object: id.ok_or(Error::InvariantViolation {
+                                message: "got 'unborn' while (null) was a symref target",
+                            })?,
+                        },
+                        Some(peeled) => Ref::Peeled {
+                            full_ref_name: path.into(),
+                            object: peeled,
+                            tag: id.ok_or(Error::InvariantViolation {
+                                message: "got 'unborn' while (null) was a symref target",
+                            })?,
+                        },
+                    },
+                    name => match id {
+                        Some(id) => Ref::Symbolic {
+                            full_ref_name: path.into(),
+                            tag: peeled.map(|_| id),
+                            object: peeled.unwrap_or(id),
+                            target: name.into(),
+                        },
+                        None => Ref::Unborn {
+                            full_ref_name: path.into(),
+                            target: name.into(),
+                        },
+                    },
+                },
+                (None, Some(peeled)) => Ref::Peeled {
+                    full_ref_name: path.into(),
+                    object: peeled,
+                    tag: id.ok_or(Error::InvariantViolation {
+                        message: "got 'unborn' as tag target",
+                    })?,
+                },
+                (None, None) => Ref::Direct {
                     object: id.ok_or(Error::InvariantViolation {
                         message: "got 'unborn' as object name of direct reference",
                     })?,
                     full_ref_name: path.into(),
-                }
+                },
             })
         }
         _ => Err(Error::MalformedV2RefLine(trimmed.to_owned().into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gix_transport::client;
+
+    use crate::handshake::{refs, refs::shared::InternalRef};
+
+    #[test]
+    fn extract_symbolic_references_from_capabilities() -> Result<(), client::Error> {
+        let caps = client::Capabilities::from_bytes(
+            b"\0unrelated symref=HEAD:refs/heads/main symref=ANOTHER:refs/heads/foo symref=MISSING_NAMESPACE_TARGET:(null) agent=git/2.28.0",
+        )?
+            .0;
+        let out = refs::shared::from_capabilities(caps.iter()).expect("a working example");
+
+        assert_eq!(
+            out,
+            vec![
+                InternalRef::SymbolicForLookup {
+                    path: "HEAD".into(),
+                    target: Some("refs/heads/main".into())
+                },
+                InternalRef::SymbolicForLookup {
+                    path: "ANOTHER".into(),
+                    target: Some("refs/heads/foo".into())
+                },
+                InternalRef::SymbolicForLookup {
+                    path: "MISSING_NAMESPACE_TARGET".into(),
+                    target: None
+                }
+            ]
+        );
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gix_path::realpath::MAX_SYMLINKS;
 
@@ -15,6 +15,17 @@ impl crate::Repository {
         self.options.git_dir_trust.expect("definitely set by now")
     }
 
+    /// Return the current working directory as present during the instantiation of this repository.
+    ///
+    /// Note that this should be preferred over manually obtaining it as this may have been adjusted to
+    /// deal with `core.precomposeUnicode`.
+    pub fn current_dir(&self) -> &Path {
+        self.options
+            .current_dir
+            .as_deref()
+            .expect("BUG: cwd is always set after instantiation")
+    }
+
     /// Returns the main git repository if this is a repository on a linked work-tree, or the `git_dir` itself.
     pub fn common_dir(&self) -> &std::path::Path {
         self.common_dir.as_deref().unwrap_or_else(|| self.git_dir())
@@ -25,12 +36,19 @@ impl crate::Repository {
         self.git_dir().join("index")
     }
 
+    /// The path to the `.gitmodules` file in the worktree, if a worktree is available.
+    #[cfg(feature = "attributes")]
+    pub fn modules_path(&self) -> Option<PathBuf> {
+        self.work_dir().map(|wtd| wtd.join(crate::submodule::MODULES_FILE))
+    }
+
     /// The path to the `.git` directory itself, or equivalent if this is a bare repository.
     pub fn path(&self) -> &std::path::Path {
         self.git_dir()
     }
 
     /// Return the work tree containing all checked out files, if there is one.
+    #[doc(alias = "workdir", alias = "git2")]
     pub fn work_dir(&self) -> Option<&std::path::Path> {
         self.work_tree.as_deref()
     }
@@ -42,45 +60,33 @@ impl crate::Repository {
     }
 
     /// Returns the relative path which is the components between the working tree and the current working dir (CWD).
-    /// Note that there may be `None` if there is no work tree, even though the `PathBuf` will be empty
-    /// if the CWD is at the root of the work tree.
+    /// Note that it may be `None` if there is no work tree, or if CWD isn't inside of the working tree directory.
+    ///
+    /// Note that the CWD is obtained once upon instantiation of the repository.
     // TODO: tests, details - there is a lot about environment variables to change things around.
-    pub fn prefix(&self) -> Option<std::io::Result<PathBuf>> {
-        self.work_tree.as_ref().map(|root| {
-            std::env::current_dir().and_then(|cwd| {
-                gix_path::realpath_opts(root, &cwd, MAX_SYMLINKS)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
-                    .and_then(|root| {
-                        cwd.strip_prefix(&root)
-                            .map_err(|_| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!(
-                                        "CWD '{}' isn't within the work tree '{}'",
-                                        cwd.display(),
-                                        root.display()
-                                    ),
-                                )
-                            })
-                            .map(ToOwned::to_owned)
-                    })
-            })
-        })
+    pub fn prefix(&self) -> Result<Option<&Path>, gix_path::realpath::Error> {
+        let (root, current_dir) = match self.work_dir().zip(self.options.current_dir.as_deref()) {
+            Some((work_dir, cwd)) => (work_dir, cwd),
+            None => return Ok(None),
+        };
+
+        let root = gix_path::realpath_opts(root, current_dir, MAX_SYMLINKS)?;
+        Ok(current_dir.strip_prefix(&root).ok())
     }
 
     /// Return the kind of repository, either bare or one with a work tree.
-    pub fn kind(&self) -> crate::Kind {
+    pub fn kind(&self) -> crate::repository::Kind {
         match self.worktree() {
             Some(wt) => {
                 if gix_discover::is_submodule_git_dir(self.git_dir()) {
-                    crate::Kind::Submodule
+                    crate::repository::Kind::Submodule
                 } else {
-                    crate::Kind::WorkTree {
+                    crate::repository::Kind::WorkTree {
                         is_linked: !wt.is_main(),
                     }
                 }
             }
-            None => crate::Kind::Bare,
+            None => crate::repository::Kind::Bare,
         }
     }
 }

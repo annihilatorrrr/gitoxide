@@ -1,6 +1,6 @@
 use std::{env, ffi::OsStr, path::PathBuf};
 
-/// The error returned by [gix_discover::upwards()][crate::upwards()].
+/// The error returned by [`gix_discover::upwards()`][crate::upwards()].
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
@@ -10,15 +10,15 @@ pub enum Error {
     InvalidInput { directory: PathBuf },
     #[error("Failed to access a directory, or path is not a directory: '{}'", .path.display())]
     InaccessibleDirectory { path: PathBuf },
-    #[error("Could find a git repository in '{}' or in any of its parents", .path.display())]
+    #[error("Could not find a git repository in '{}' or in any of its parents", .path.display())]
     NoGitRepository { path: PathBuf },
-    #[error("Could find a git repository in '{}' or in any of its parents within ceiling height of {}", .path.display(), .ceiling_height)]
+    #[error("Could not find a git repository in '{}' or in any of its parents within ceiling height of {}", .path.display(), .ceiling_height)]
     NoGitRepositoryWithinCeiling { path: PathBuf, ceiling_height: usize },
-    #[error("Could find a git repository in '{}' or in any of its parents within device limits below '{}'", .path.display(), .limit.display())]
+    #[error("Could not find a git repository in '{}' or in any of its parents within device limits below '{}'", .path.display(), .limit.display())]
     NoGitRepositoryWithinFs { path: PathBuf, limit: PathBuf },
     #[error("None of the passed ceiling directories prefixed the git-dir candidate, making them ineffective.")]
     NoMatchingCeilingDir,
-    #[error("Could find a trusted git repository in '{}' or in any of its parents, candidate at '{}' discarded", .path.display(), .candidate.display())]
+    #[error("Could not find a trusted git repository in '{}' or in any of its parents, candidate at '{}' discarded", .path.display(), .candidate.display())]
     NoTrustedGitRepository {
         path: PathBuf,
         candidate: PathBuf,
@@ -53,10 +53,20 @@ pub struct Options<'a> {
     // TODO: test on Linux
     // TODO: Handle WASI once https://github.com/rust-lang/rust/issues/71213 is resolved
     pub cross_fs: bool,
+    /// If true, limit discovery to `.git` directories.
+    ///
+    /// This  will fail to find typical bare repositories, but would find them if they happen to be named `.git`.
+    /// Use this option if repos with worktrees are the only kind of repositories you are interested in for
+    /// optimal discovery performance.
+    pub dot_git_only: bool,
     /// If set, the _current working directory_ (absolute path) to use when resolving relative paths. Note that
     /// that this is merely an optimization for those who discover a lot of repositories in the same process.
     ///
     /// If unset, the current working directory will be obtained automatically.
+    /// Note that the path here might or might not contained decomposed unicode, which may end up in a path
+    /// relevant us, like the git-dir or the worktree-dir. However, when opening the repository, it will
+    /// change decomposed unicode to precomposed unicode based on the value of `core.precomposeUnicode`, and we
+    /// don't have to deal with that value here just yet.
     pub current_dir: Option<&'a std::path::Path>,
 }
 
@@ -67,6 +77,7 @@ impl Default for Options<'_> {
             ceiling_dirs: vec![],
             match_ceiling_dir_or_error: true,
             cross_fs: false,
+            dot_git_only: false,
             current_dir: None,
         }
     }
@@ -79,17 +90,13 @@ impl Options<'_> {
     /// - `GIT_CEILING_DIRECTORIES` for `ceiling_dirs`
     ///
     /// Note that `GIT_DISCOVERY_ACROSS_FILESYSTEM` for `cross_fs` is **not** read,
-    /// as it requires parsing of `gix-config` style boolean values.
-    ///
-    /// In addition, this function disables `match_ceiling_dir_or_error` to allow
-    /// discovery if an outside environment variable sets non-matching ceiling directories.
+    /// as it requires parsing of `git-config` style boolean values.
     // TODO: test
     pub fn apply_environment(mut self) -> Self {
         let name = "GIT_CEILING_DIRECTORIES";
         if let Some(ceiling_dirs) = env::var_os(name) {
             self.ceiling_dirs = parse_ceiling_dirs(&ceiling_dirs);
         }
-        self.match_ceiling_dir_or_error = false;
         self
     }
 }

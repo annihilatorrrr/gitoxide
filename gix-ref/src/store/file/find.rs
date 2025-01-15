@@ -1,23 +1,28 @@
 use std::{
     borrow::Cow,
-    convert::TryInto,
     io::{self, Read},
     path::{Path, PathBuf},
 };
 
 pub use error::Error;
 
+use crate::name::is_pseudo_ref;
 use crate::{
     file,
     store_impl::{file::loose, packed},
-    BStr, BString, FullNameRef, PartialNameRef, Reference,
+    BStr, BString, FullNameRef, PartialName, PartialNameRef, Reference,
 };
 
-enum Transform {
-    EnforceRefsPrefix,
-    None,
-}
-
+/// ### Finding References - notes about precomposed unicode.
+///
+/// Generally, ref names and the target of symbolic refs are stored as-is if [`Self::precompose_unicode`] is `false`.
+/// If `true`, refs are stored as precomposed unicode in `packed-refs`, but stored as is on disk as it is then assumed
+/// to be indifferent, i.e. `"a\u{308}"` is the same as `"ä"`.
+///
+/// This also means that when refs are packed for transmission to another machine, both their names and the target of
+/// symbolic references need to be precomposed.
+///
+/// Namespaces are left as is as they never get past the particular repository that uses them.
 impl file::Store {
     /// Find a single reference by the given `path` which is required to be a valid reference name.
     ///
@@ -50,7 +55,7 @@ impl file::Store {
         Error: From<E>,
     {
         self.find_one_with_verified_input(partial.try_into()?, None)
-            .map(|r| r.map(|r| r.try_into().expect("only loose refs are found without pack")))
+            .map(|r| r.map(Into::into))
     }
 
     /// Similar to [`file::Store::find()`], but allows to pass a snapshotted packed buffer instead.
@@ -71,45 +76,95 @@ impl file::Store {
         partial_name: &PartialNameRef,
         packed: Option<&packed::Buffer>,
     ) -> Result<Option<Reference>, Error> {
-        let mut buf = BString::default();
-        if partial_name.looks_like_full_name() {
-            if let Some(r) = self.find_inner("", partial_name, None, Transform::None, &mut buf)? {
-                return Ok(Some(r));
-            }
-        }
-
-        for inbetween in &["", "tags", "heads", "remotes"] {
-            match self.find_inner(inbetween, partial_name, packed, Transform::EnforceRefsPrefix, &mut buf) {
-                Ok(Some(r)) => return Ok(Some(r)),
-                Ok(None) => {
-                    continue;
+        fn decompose_if(mut r: Reference, input_changed_to_precomposed: bool) -> Reference {
+            if input_changed_to_precomposed {
+                use gix_object::bstr::ByteSlice;
+                let decomposed = r
+                    .name
+                    .0
+                    .to_str()
+                    .ok()
+                    .map(|name| gix_utils::str::decompose(name.into()));
+                if let Some(Cow::Owned(decomposed)) = decomposed {
+                    r.name.0 = decomposed.into();
                 }
-                Err(err) => return Err(err),
+            }
+            r
+        }
+        let mut buf = BString::default();
+        let mut precomposed_partial_name_storage = packed.filter(|_| self.precompose_unicode).and_then(|_| {
+            use gix_object::bstr::ByteSlice;
+            let precomposed = partial_name.0.to_str().ok()?;
+            let precomposed = gix_utils::str::precompose(precomposed.into());
+            match precomposed {
+                Cow::Owned(precomposed) => Some(PartialName(precomposed.into())),
+                Cow::Borrowed(_) => None,
+            }
+        });
+        let precomposed_partial_name = precomposed_partial_name_storage
+            .as_ref()
+            .map(std::convert::AsRef::as_ref);
+        for consider_pseudo_ref in [true, false] {
+            if !consider_pseudo_ref && !is_pseudo_ref(partial_name.as_bstr()) {
+                break;
+            }
+            'try_directories: for inbetween in &["", "tags", "heads", "remotes"] {
+                match self.find_inner(
+                    inbetween,
+                    partial_name,
+                    precomposed_partial_name,
+                    packed,
+                    &mut buf,
+                    consider_pseudo_ref,
+                ) {
+                    Ok(Some(r)) => return Ok(Some(decompose_if(r, precomposed_partial_name.is_some()))),
+                    Ok(None) => {
+                        if consider_pseudo_ref && is_pseudo_ref(partial_name.as_bstr()) {
+                            break 'try_directories;
+                        }
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
-        self.find_inner(
-            "remotes",
-            partial_name
-                .to_owned()
-                .join("HEAD")
-                .expect("HEAD is valid name")
-                .as_ref(),
-            None,
-            Transform::EnforceRefsPrefix,
-            &mut buf,
-        )
+        if partial_name.as_bstr() != "HEAD" {
+            if let Some(mut precomposed) = precomposed_partial_name_storage {
+                precomposed = precomposed.join("HEAD".into()).expect("HEAD is valid name");
+                precomposed_partial_name_storage = Some(precomposed);
+            }
+            self.find_inner(
+                "remotes",
+                partial_name
+                    .to_owned()
+                    .join("HEAD".into())
+                    .expect("HEAD is valid name")
+                    .as_ref(),
+                precomposed_partial_name_storage
+                    .as_ref()
+                    .map(std::convert::AsRef::as_ref),
+                None,
+                &mut buf,
+                true, /* consider-pseudo-ref */
+            )
+            .map(|res| res.map(|r| decompose_if(r, precomposed_partial_name_storage.is_some())))
+        } else {
+            Ok(None)
+        }
     }
 
     fn find_inner(
         &self,
         inbetween: &str,
         partial_name: &PartialNameRef,
+        precomposed_partial_name: Option<&PartialNameRef>,
         packed: Option<&packed::Buffer>,
-        transform: Transform,
         path_buf: &mut BString,
+        consider_pseudo_ref: bool,
     ) -> Result<Option<Reference>, Error> {
-        let add_refs_prefix = matches!(transform, Transform::EnforceRefsPrefix);
-        let full_name = partial_name.construct_full_name_ref(add_refs_prefix, inbetween, path_buf);
+        let full_name = precomposed_partial_name
+            .unwrap_or(partial_name)
+            .construct_full_name_ref(inbetween, path_buf, consider_pseudo_ref);
         let content_buf = self.ref_contents(full_name).map_err(|err| Error::ReadFileContents {
             source: err,
             path: self.reference_path(full_name),
@@ -166,10 +221,10 @@ impl file::Store {
         let linked_git_dir =
             |worktree_name: &BStr| commondir.join("worktrees").join(gix_path::from_bstr(worktree_name));
         name.category_and_short_name()
-            .and_then(|(c, sn)| {
+            .map(|(c, sn)| {
                 use crate::Category::*;
                 let sn = FullNameRef::new_unchecked(sn);
-                Some(match c {
+                match c {
                     LinkedPseudoRef { name: worktree_name } => is_reflog
                         .then(|| (linked_git_dir(worktree_name).into(), sn))
                         .unwrap_or((commondir.into(), name)),
@@ -177,7 +232,7 @@ impl file::Store {
                     MainRef | MainPseudoRef => (commondir.into(), sn),
                     LinkedRef { name: worktree_name } => sn
                         .category()
-                        .map_or(false, |cat| cat.is_worktree_private())
+                        .is_some_and(|cat| cat.is_worktree_private())
                         .then(|| {
                             if is_reflog {
                                 (linked_git_dir(worktree_name).into(), sn)
@@ -186,10 +241,10 @@ impl file::Store {
                             }
                         })
                         .unwrap_or((commondir.into(), sn)),
-                    PseudoRef | Bisect | Rewritten | WorktreePrivate => return None,
-                })
+                    PseudoRef | Bisect | Rewritten | WorktreePrivate => (self.git_dir.as_path().into(), name),
+                }
             })
-            .unwrap_or((self.git_dir.as_path().into(), name))
+            .unwrap_or((commondir.into(), name))
     }
 
     /// Implements the logic required to transform a fully qualified refname into a filesystem path
@@ -214,8 +269,20 @@ impl file::Store {
 
     /// Read the file contents with a verified full reference path and return it in the given vector if possible.
     pub(crate) fn ref_contents(&self, name: &FullNameRef) -> io::Result<Option<Vec<u8>>> {
-        let ref_path = self.reference_path(name);
+        let (base, relative_path) = self.reference_path_with_base(name);
+        if self.prohibit_windows_device_names
+            && relative_path
+                .components()
+                .filter_map(|c| gix_path::try_os_str_into_bstr(c.as_os_str().into()).ok())
+                .any(|c| gix_validate::path::component_is_windows_device(c.as_ref()))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Illegal use of reserved Windows device name in \"{}\"", name.as_bstr()),
+            ));
+        }
 
+        let ref_path = base.join(relative_path);
         match std::fs::File::open(&ref_path) {
             Ok(mut file) => {
                 let mut buf = Vec::with_capacity(128);
@@ -234,8 +301,6 @@ impl file::Store {
 
 ///
 pub mod existing {
-    use std::convert::TryInto;
-
     pub use error::Error;
 
     use crate::{
@@ -277,8 +342,7 @@ pub mod existing {
             Name: TryInto<&'a PartialNameRef, Error = E>,
             crate::name::Error: From<E>,
         {
-            self.find_existing_inner(partial, None)
-                .map(|r| r.try_into().expect("always loose without packed"))
+            self.find_existing_inner(partial, None).map(Into::into)
         }
 
         /// Similar to [`file::Store::find()`] but a non-existing ref is treated as error.

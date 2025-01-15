@@ -3,9 +3,9 @@ use std::{
     time::Instant,
 };
 
-use gix_features::progress::Progress;
+use gix_features::progress::{Count, DynNestedProgress, Progress};
 
-use crate::{loose::Store, Write};
+use crate::loose::Store;
 
 ///
 pub mod integrity {
@@ -33,7 +33,7 @@ pub mod integrity {
 
     /// The outcome returned by [`verify_integrity()`][super::Store::verify_integrity()].
     #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Clone)]
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Statistics {
         /// The amount of loose objects we checked.
         pub num_objects: usize,
@@ -61,19 +61,20 @@ impl Store {
     /// Check all loose objects for their integrity checking their hash matches the actual data and by decoding them fully.
     pub fn verify_integrity(
         &self,
-        mut progress: impl Progress,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
     ) -> Result<integrity::Statistics, integrity::Error> {
+        use gix_object::Write;
         let mut buf = Vec::new();
         let sink = crate::sink(self.object_hash);
 
         let mut num_objects = 0;
         let start = Instant::now();
-        let mut progress = progress.add_child_with_id("Validating", integrity::ProgressId::LooseObjects.into());
+        let mut progress = progress.add_child_with_id("Validating".into(), integrity::ProgressId::LooseObjects.into());
         progress.init(None, gix_features::progress::count("loose objects"));
         for id in self.iter().filter_map(Result::ok) {
             let object = self
-                .try_find(id, &mut buf)
+                .try_find(&id, &mut buf)
                 .map_err(|_| integrity::Error::Retry)?
                 .ok_or(integrity::Error::Retry)?;
             let actual_id = sink.write_buf(object.kind, object.data).expect("sink never fails");

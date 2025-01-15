@@ -1,6 +1,5 @@
 use std::borrow::BorrowMut;
 
-use gix_hash::oid;
 use gix_object::TreeRefIter;
 use gix_traverse::tree::breadthfirst;
 
@@ -16,29 +15,65 @@ pub trait TreeIterExt: Sealed {
     fn traverse<StateMut, Find, V>(
         &self,
         state: StateMut,
-        find: Find,
+        objects: Find,
         delegate: &mut V,
     ) -> Result<(), breadthfirst::Error>
     where
-        Find: for<'a> FnMut(&oid, &'a mut Vec<u8>) -> Option<TreeRefIter<'a>>,
+        Find: gix_object::Find,
         StateMut: BorrowMut<breadthfirst::State>,
         V: gix_traverse::tree::Visit;
 }
 
-impl<'d> Sealed for TreeRefIter<'d> {}
+impl Sealed for TreeRefIter<'_> {}
 
-impl<'d> TreeIterExt for TreeRefIter<'d> {
+impl TreeIterExt for TreeRefIter<'_> {
     fn traverse<StateMut, Find, V>(
         &self,
         state: StateMut,
-        find: Find,
+        objects: Find,
         delegate: &mut V,
     ) -> Result<(), breadthfirst::Error>
     where
-        Find: for<'a> FnMut(&oid, &'a mut Vec<u8>) -> Option<TreeRefIter<'a>>,
+        Find: gix_object::Find,
         StateMut: BorrowMut<breadthfirst::State>,
         V: gix_traverse::tree::Visit,
     {
-        breadthfirst(self.clone(), state, find, delegate)
+        breadthfirst(*self, state, objects, delegate)
     }
+}
+
+/// Extensions for [EntryRef](gix_object::tree::EntryRef).
+pub trait TreeEntryRefExt<'a>: 'a {
+    /// Attach [`repo`](crate::Repository) to the given tree entry. It can be detached later with `detach()`.
+    fn attach<'repo>(self, repo: &'repo crate::Repository) -> crate::object::tree::EntryRef<'repo, 'a>;
+}
+
+impl<'a> TreeEntryRefExt<'a> for gix_object::tree::EntryRef<'a> {
+    fn attach<'repo>(self, repo: &'repo crate::Repository) -> crate::object::tree::EntryRef<'repo, 'a> {
+        crate::object::tree::EntryRef { inner: self, repo }
+    }
+}
+
+/// Extensions for [Entry](gix_object::tree::Entry).
+pub trait TreeEntryExt {
+    /// Attach [`repo`](crate::Repository) to the given tree entry. It can be detached later with `detach()`.
+    fn attach(self, repo: &crate::Repository) -> crate::object::tree::Entry<'_>;
+}
+
+impl TreeEntryExt for gix_object::tree::Entry {
+    fn attach(self, repo: &crate::Repository) -> crate::object::tree::Entry<'_> {
+        crate::object::tree::Entry { inner: self, repo }
+    }
+}
+
+/// Extensions for [Change](gix_diff::tree_with_rewrites::Change).
+#[cfg(feature = "blob-diff")]
+pub trait TreeDiffChangeExt {
+    /// Attach [`old_repo`](crate::Repository) and `new_repo` to current instance. It can be detached later with `detach()`.
+    /// Note that both repositories are usually the same.
+    fn attach<'old, 'new>(
+        &self,
+        old_repo: &'old crate::Repository,
+        new_repo: &'new crate::Repository,
+    ) -> crate::object::tree::diff::Change<'_, 'old, 'new>;
 }

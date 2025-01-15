@@ -1,11 +1,12 @@
-use std::{convert::TryInto, io::Write};
+use std::io::Write;
 
 use crate::{entry, extension, write::util::CountBytes, State, Version};
 
 /// A way to specify which of the optional extensions to write.
-#[derive(Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone)]
 pub enum Extensions {
-    /// Writes all available optional extensions to avoid loosing any information.
+    /// Writes all available optional extensions to avoid losing any information.
+    #[default]
     All,
     /// Only write the given optional extensions, with each extension being marked by a boolean flag.
     ///
@@ -21,12 +22,6 @@ pub enum Extensions {
     },
     /// Write no optional extension at all for what should be the smallest possible index
     None,
-}
-
-impl Default for Extensions {
-    fn default() -> Self {
-        Extensions::All
-    }
 }
 
 impl Extensions {
@@ -53,13 +48,27 @@ impl Extensions {
 /// Note that default options write either index V2 or V3 depending on the content of the entries.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Options {
-    /// Configures which extensions to write
+    /// Configures which extensions to write.
     pub extensions: Extensions,
+    /// Set the trailing hash of the produced index to all zeroes to save some time.
+    ///
+    /// This value is typically controlled by `index.skipHash` and is respected when the index is written
+    /// via [`File::write()`](crate::File::write()) and [`File::write_to()`](crate::File::write_to()).
+    /// Note that
+    pub skip_hash: bool,
 }
 
 impl State {
     /// Serialize this instance to `out` with [`options`][Options].
-    pub fn write_to(&self, out: impl std::io::Write, Options { extensions }: Options) -> std::io::Result<Version> {
+    pub fn write_to(
+        &self,
+        out: impl std::io::Write,
+        Options {
+            extensions,
+            skip_hash: _,
+        }: Options,
+    ) -> std::io::Result<Version> {
+        let _span = gix_features::trace::detail!("gix_index::State::write()");
         let version = self.detect_required_version();
 
         let mut write = CountBytes::new(out);
@@ -86,7 +95,7 @@ impl State {
                 .is_some()
             && !extension_toc.is_empty()
         {
-            extension::end_of_index_entry::write_to(out, self.object_hash, offset_to_extensions, extension_toc)?
+            extension::end_of_index_entry::write_to(out, self.object_hash, offset_to_extensions, extension_toc)?;
         }
 
         Ok(version)
@@ -174,8 +183,6 @@ fn entries<T: std::io::Write>(out: &mut CountBytes<T>, state: &State, header_siz
 }
 
 mod util {
-    use std::convert::TryFrom;
-
     pub struct CountBytes<T> {
         pub count: u32,
         pub inner: T,

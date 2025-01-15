@@ -8,7 +8,7 @@ use crate::{PacketLineRef, DELIMITER_LINE, FLUSH_LINE, MAX_DATA_LEN, MAX_LINE_LE
 pub enum Error {
     #[error("Failed to decode the first four hex bytes indicating the line length: {err}")]
     HexDecode { err: String },
-    #[error("The data received claims to be larger than than the maximum allowed size: got {length_in_bytes}, exceeds {MAX_DATA_LEN}")]
+    #[error("The data received claims to be larger than the maximum allowed size: got {length_in_bytes}, exceeds {MAX_DATA_LEN}")]
     DataLengthLimitExceeded { length_in_bytes: usize },
     #[error("Received an invalid empty line")]
     DataIsEmpty,
@@ -43,7 +43,7 @@ pub enum Stream<'a> {
         /// The amount of bytes consumed from input
         bytes_consumed: usize,
     },
-    /// A packet line could not yet be parsed to to missing bytes
+    /// A packet line could not yet be parsed due to missing bytes
     Incomplete {
         /// The amount of additional bytes needed for the parsing to complete
         bytes_needed: usize,
@@ -72,7 +72,7 @@ pub fn hex_prefix(four_bytes: &[u8]) -> Result<PacketLineOrWantedSize<'_>, Error
     }
 
     let mut buf = [0u8; U16_HEX_BYTES / 2];
-    hex::decode_to_slice(four_bytes, &mut buf).map_err(|err| Error::HexDecode { err: err.to_string() })?;
+    faster_hex::hex_decode(four_bytes, &mut buf).map_err(|err| Error::HexDecode { err: err.to_string() })?;
     let wanted_bytes = u16::from_be_bytes(buf);
 
     if wanted_bytes == 3 {

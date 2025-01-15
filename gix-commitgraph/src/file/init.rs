@@ -1,15 +1,14 @@
-use std::{
-    convert::{TryFrom, TryInto},
-    path::Path,
-};
+use std::path::Path;
+use std::path::PathBuf;
 
+use crate::{
+    file::{
+        ChunkId, BASE_GRAPHS_LIST_CHUNK_ID, COMMIT_DATA_CHUNK_ID, COMMIT_DATA_ENTRY_SIZE_SANS_HASH,
+        EXTENDED_EDGES_LIST_CHUNK_ID, FAN_LEN, HEADER_LEN, OID_FAN_CHUNK_ID, OID_LOOKUP_CHUNK_ID, SIGNATURE,
+    },
+    File,
+};
 use bstr::ByteSlice;
-use memmap2::Mmap;
-
-use crate::file::{
-    ChunkId, File, BASE_GRAPHS_LIST_CHUNK_ID, COMMIT_DATA_CHUNK_ID, COMMIT_DATA_ENTRY_SIZE_SANS_HASH,
-    EXTENDED_EDGES_LIST_CHUNK_ID, FAN_LEN, HEADER_LEN, OID_FAN_CHUNK_ID, OID_LOOKUP_CHUNK_ID, SIGNATURE,
-};
 
 /// The error used in [`File::at()`].
 #[derive(thiserror::Error, Debug)]
@@ -59,24 +58,13 @@ impl File {
     pub fn at(path: impl AsRef<Path>) -> Result<File, Error> {
         Self::try_from(path.as_ref())
     }
-}
 
-impl TryFrom<&Path> for File {
-    type Error = Error;
-
-    fn try_from(path: &Path) -> Result<Self, Self::Error> {
-        let data = std::fs::File::open(path)
-            .and_then(|file| {
-                // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
-                #[allow(unsafe_code)]
-                unsafe {
-                    Mmap::map(&file)
-                }
-            })
-            .map_err(|e| Error::Io {
-                err: e,
-                path: path.to_owned(),
-            })?;
+    /// A lower-level constructor which constructs a new instance directly from the mapping in `data`,
+    /// assuming that it originated from `path`.
+    ///
+    /// Note that `path` is only used for verification of the hash its basename contains, but otherwise
+    /// is not of importance.
+    pub fn new(data: memmap2::Mmap, path: PathBuf) -> Result<File, Error> {
         let data_size = data.len();
         if data_size < MIN_FILE_SIZE {
             return Err(Error::Corrupt(
@@ -111,7 +99,7 @@ impl TryFrom<&Path> for File {
         let base_graph_count = data[ofs];
         ofs += 1;
 
-        let chunks = gix_chunk::file::Index::from_bytes(&data, ofs, chunk_count as u32)?;
+        let chunks = gix_chunk::file::Index::from_bytes(&data, ofs, u32::from(chunk_count))?;
 
         let base_graphs_list_offset = chunks
             .validated_usize_offset_by_id(BASE_GRAPHS_LIST_CHUNK_ID, |chunk_range| {
@@ -237,17 +225,39 @@ impl TryFrom<&Path> for File {
             extra_edges_list_range,
             fan,
             oid_lookup_offset,
-            path: path.to_owned(),
+            path,
             hash_len: object_hash.len_in_bytes(),
             object_hash,
         })
     }
 }
 
+impl TryFrom<&Path> for File {
+    type Error = Error;
+
+    fn try_from(path: &Path) -> Result<Self, Self::Error> {
+        let data = std::fs::File::open(path)
+            .and_then(|file| {
+                // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
+                #[allow(unsafe_code)]
+                unsafe {
+                    memmap2::MmapOptions::new().map_copy_read_only(&file)
+                }
+            })
+            .map_err(|e| Error::Io {
+                err: e,
+                path: path.to_owned(),
+            })?;
+        Self::new(data, path.to_owned())
+    }
+}
+
 // Copied from gix-odb/pack/index/init.rs
 fn read_fan(d: &[u8]) -> ([u32; FAN_LEN], usize) {
+    assert!(d.len() >= FAN_LEN * 4);
+
     let mut fan = [0; FAN_LEN];
-    for (c, f) in d.chunks(4).zip(fan.iter_mut()) {
+    for (c, f) in d.chunks_exact(4).zip(fan.iter_mut()) {
         *f = u32::from_be_bytes(c.try_into().unwrap());
     }
     (fan, FAN_LEN * 4)

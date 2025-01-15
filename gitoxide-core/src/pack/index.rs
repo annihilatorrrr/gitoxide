@@ -1,12 +1,13 @@
 use std::{fs, io, path::PathBuf, str::FromStr, sync::atomic::AtomicBool};
 
-use gix::{odb::pack, Progress};
+use gix::{odb::pack, NestedProgress};
 
 use crate::OutputFormat;
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Default, Clone, Eq, PartialEq, Debug)]
 pub enum IterationMode {
     AsIs,
+    #[default]
     Verify,
     Restore,
 }
@@ -14,12 +15,6 @@ pub enum IterationMode {
 impl IterationMode {
     pub fn variants() -> &'static [&'static str] {
         &["as-is", "verify", "restore"]
-    }
-}
-
-impl Default for IterationMode {
-    fn default() -> Self {
-        IterationMode::Verify
     }
 }
 
@@ -60,7 +55,7 @@ pub struct Context<'a, W: io::Write> {
 
 pub fn stream_len(mut s: impl io::Seek) -> io::Result<u64> {
     use io::SeekFrom;
-    let old_pos = s.seek(SeekFrom::Current(0))?;
+    let old_pos = s.stream_position()?;
     let len = s.seek(SeekFrom::End(0))?;
     if old_pos != len {
         s.seek(SeekFrom::Start(old_pos))?;
@@ -75,16 +70,12 @@ pub enum PathOrRead {
     Read(Box<dyn std::io::Read + Send + 'static>),
 }
 
-pub fn from_pack<P>(
+pub fn from_pack(
     pack: PathOrRead,
     directory: Option<PathBuf>,
-    progress: P,
+    mut progress: impl NestedProgress + 'static,
     ctx: Context<'static, impl io::Write>,
-) -> anyhow::Result<()>
-where
-    P: Progress,
-    P::SubProgress: 'static,
-{
+) -> anyhow::Result<()> {
     use anyhow::Context;
     let options = pack::bundle::write::Options {
         thread_limit: ctx.thread_limit,
@@ -99,12 +90,12 @@ where
             let pack_len = pack.metadata()?.len();
             let pack_file = fs::File::open(pack)?;
             pack::Bundle::write_to_directory_eagerly(
-                pack_file,
+                Box::new(pack_file),
                 Some(pack_len),
                 directory,
-                progress,
+                &mut progress,
                 ctx.should_interrupt,
-                None,
+                None::<gix::objs::find::Never>,
                 options,
             )
         }
@@ -112,16 +103,16 @@ where
             input,
             None,
             directory,
-            progress,
+            &mut progress,
             ctx.should_interrupt,
-            None,
+            None::<gix::objs::find::Never>,
             options,
         ),
     }
     .with_context(|| "Failed to write pack and index")?;
     match format {
         OutputFormat::Human => drop(human_output(out, res)),
-        #[cfg(feature = "serde1")]
+        #[cfg(feature = "serde")]
         OutputFormat::Json => serde_json::to_writer_pretty(out, &res)?,
     };
     Ok(())

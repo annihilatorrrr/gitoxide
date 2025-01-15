@@ -1,7 +1,7 @@
-use crate::{bstr::BString, object, reference};
+use crate::{bstr::BString, object, reference, remote};
 
 /// A hint to know what to do if refs and object names are equal.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum RefsHint {
     /// This is the default, and leads to specs that look like objects identified by full hex sha and are objects to be used
     /// instead of similarly named references. The latter is not typical but can absolutely happen by accident.
@@ -9,6 +9,7 @@ pub enum RefsHint {
     /// preferred as there are many valid object names like `beef` and `cafe` that are short and both valid and typical prefixes
     /// for objects.
     /// Git chooses this as default as well, even though it means that every object prefix is also looked up as ref.
+    #[default]
     PreferObjectOnFullLengthHexShaUseRefOtherwise,
     /// No matter what, if it looks like an object prefix and has an object, use it.
     /// Note that no ref-lookup is made here which is the fastest option.
@@ -38,12 +39,6 @@ pub enum ObjectKindHint {
     Blob,
 }
 
-impl Default for RefsHint {
-    fn default() -> Self {
-        RefsHint::PreferObjectOnFullLengthHexShaUseRefOtherwise
-    }
-}
-
 /// Options for use in [`revision::Spec::from_bstr()`][crate::revision::Spec::from_bstr()].
 #[derive(Debug, Default, Copy, Clone)]
 pub struct Options {
@@ -60,12 +55,28 @@ pub struct Options {
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
+    #[error("Could not peel '{}' to obtain its target", name)]
+    PeelToId {
+        name: gix_ref::FullName,
+        source: reference::peel::Error,
+    },
     #[error("The rev-spec is malformed and misses a ref name")]
     Malformed,
     #[error("Unborn heads do not have a reflog yet")]
     UnbornHeadsHaveNoRefLog,
-    #[error("This feature will be implemented once {dependency}")]
-    Planned { dependency: &'static str },
+    #[error("Unborn heads cannot have push or upstream tracking branches")]
+    UnbornHeadForSibling,
+    #[error("Branch named {name} does not have a {} tracking branch configured", direction.as_str())]
+    NoTrackingBranch {
+        name: gix_ref::FullName,
+        direction: remote::Direction,
+    },
+    #[error("Error when obtaining {} tracking branch for {name}", direction.as_str())]
+    GetTrackingBranch {
+        name: gix_ref::FullName,
+        direction: remote::Direction,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     #[error("Reference {reference:?} does not have a reference log, cannot {action}")]
     MissingRefLog { reference: BString, action: &'static str },
     #[error("HEAD has {available} prior checkouts and checkout number {desired} is out of range")]
@@ -90,7 +101,7 @@ pub enum Error {
         desired: usize,
         available: usize,
     },
-    #[error("Path {desired_path:?} did not exist in index at stage {desired_stage}{}{}", stage_hint.map(|actual|format!(". It does exist at stage {actual}")).unwrap_or_default(), exists.then(|| ". It exists on disk").unwrap_or(". It does not exist on disk"))]
+    #[error("Path {desired_path:?} did not exist in index at stage {}{}{}", *desired_stage as u8, stage_hint.map(|actual|format!(". It does exist at stage {}", actual as u8)).unwrap_or_default(), exists.then(|| ". It exists on disk").unwrap_or(". It does not exist on disk"))]
     IndexLookup {
         desired_path: BString,
         desired_stage: gix_index::entry::Stage,
@@ -105,15 +116,15 @@ pub enum Error {
     RevWalkIterInit(#[from] crate::reference::iter::init::Error),
     #[error(transparent)]
     RevWalkAllReferences(#[from] gix_ref::packed::buffer::open::Error),
-    #[cfg(feature = "regex")]
+    #[cfg(feature = "revparse-regex")]
     #[error(transparent)]
     InvalidRegex(#[from] regex::Error),
     #[cfg_attr(
-        feature = "regex",
+        feature = "revparse-regex",
         error("None of {commits_searched} commits from {oid} matched regex {regex:?}")
     )]
     #[cfg_attr(
-        not(feature = "regex"),
+        not(feature = "revparse-regex"),
         error("None of {commits_searched} commits from {oid} matched text {regex:?}")
     )]
     NoRegexMatch {
@@ -122,11 +133,11 @@ pub enum Error {
         commits_searched: usize,
     },
     #[cfg_attr(
-        feature = "regex",
+        feature = "revparse-regex",
         error("None of {commits_searched} commits reached from all references matched regex {regex:?}")
     )]
     #[cfg_attr(
-        not(feature = "regex"),
+        not(feature = "revparse-regex"),
         error("None of {commits_searched} commits reached from all references matched text {regex:?}")
     )]
     NoRegexMatchAllRefs { regex: BString, commits_searched: usize },
@@ -176,7 +187,11 @@ pub enum Error {
         next: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
     #[error(transparent)]
-    Traverse(#[from] gix_traverse::commit::ancestors::Error),
+    Traverse(#[from] crate::revision::walk::iter::Error),
+    #[error(transparent)]
+    Walk(#[from] crate::revision::walk::Error),
     #[error("Spec does not contain a single object id")]
     SingleNotFound,
+    #[error("Reflog does not contain any entries")]
+    EmptyReflog,
 }

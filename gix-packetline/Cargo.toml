@@ -1,13 +1,15 @@
+lints.workspace = true
+
 [package]
 name = "gix-packetline"
-version = "0.14.3"
-repository = "https://github.com/Byron/gitoxide"
-license = "MIT/Apache-2.0"
-description = "A WIP crate of the gitoxide project implementing the pkt-line serialization format"
+version = "0.18.2"
+repository = "https://github.com/GitoxideLabs/gitoxide"
+license = "MIT OR Apache-2.0"
+description = "A crate of the gitoxide project implementing the pkt-line serialization format"
 authors = ["Sebastian Thiel <sebastian.thiel@icloud.com>"]
 edition = "2021"
-include = ["src/**/*", "CHANGELOG.md"]
-rust-version = "1.64"
+include = ["src/**/*", "LICENSE-*"]
+rust-version = "1.70"
 
 [lib]
 doctest = false
@@ -22,11 +24,11 @@ default = []
 ## If set, all IO will become blocking. The same types will be used preventing side-by-side usage of blocking and non-blocking IO.
 blocking-io = []
 ## Implement IO traits from `futures-io`.
-async-io = ["futures-io", "futures-lite", "pin-project-lite"]
+async-io = ["dep:futures-io", "dep:futures-lite", "dep:pin-project-lite"]
 
 #! ### Other
 ## Data structures implement `serde::Serialize` and `serde::Deserialize`.
-serde1 = ["serde", "bstr/serde"]
+serde = ["dep:serde", "bstr/serde"]
 
 [[test]]
 name = "async-packetline"
@@ -39,23 +41,25 @@ path = "tests/blocking-packetline.rs"
 required-features = ["blocking-io", "maybe-async/is_sync"]
 
 [dependencies]
-serde = { version = "1.0.114", optional = true, default-features = false, features = ["std", "derive"]}
-thiserror = "1.0.34"
-hex = "0.4.2"
+gix-trace = { version = "^0.1.11", path = "../gix-trace" }
+
+serde = { version = "1.0.114", optional = true, default-features = false, features = ["std", "derive"] }
+thiserror = "2.0.0"
+faster-hex = { version = "0.9.0" }
 bstr = { version = "1.3.0", default-features = false, features = ["std"] }
 # async support
 futures-io = { version = "0.3.16", optional = true }
-futures-lite = { version  = "1.12.0", optional = true }
+futures-lite = { version = "2.1.0", optional = true }
 pin-project-lite = { version = "0.2.6", optional = true }
 
 document-features = { version = "0.2.0", optional = true }
 
 [dev-dependencies]
 gix-odb = { path = "../gix-odb" }
+gix-pack-for-configuration = { package = "gix-pack", path = "../gix-pack", default-features = false, features = ["streaming-input"] }
 gix-hash = { path = "../gix-hash" }
 async-std = { version = "1.9.0", features = ["attributes"] }
 maybe-async = "0.2.6"
 
 [package.metadata.docs.rs]
-features = ["document-features", "blocking-io", "serde1"]
-rustdoc-args = ["--cfg", "docsrs"]
+features = ["document-features", "blocking-io", "serde"]

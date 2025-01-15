@@ -7,7 +7,7 @@ use std::{
 use futures_io::{AsyncBufRead, AsyncRead};
 use futures_lite::ready;
 
-use crate::{decode, BandRef, PacketLineRef, StreamingPeekableIter, TextRef, U16_HEX_BYTES};
+use crate::{decode, read::ProgressAction, BandRef, PacketLineRef, StreamingPeekableIter, TextRef, U16_HEX_BYTES};
 
 type ReadLineResult<'a> = Option<std::io::Result<Result<PacketLineRef<'a>, decode::Error>>>;
 /// An implementor of [`AsyncBufRead`] yielding packet lines on each call to [`read_line()`][AsyncBufRead::read_line()].
@@ -23,7 +23,7 @@ where
     cap: usize,
 }
 
-impl<'a, T, F> Drop for WithSidebands<'a, T, F>
+impl<T, F> Drop for WithSidebands<'_, T, F>
 where
     T: AsyncRead,
 {
@@ -37,7 +37,7 @@ where
     }
 }
 
-impl<'a, T> WithSidebands<'a, T, fn(bool, &[u8])>
+impl<'a, T> WithSidebands<'a, T, fn(bool, &[u8]) -> ProgressAction>
 where
     T: AsyncRead,
 {
@@ -70,30 +70,12 @@ enum State<'a, T> {
 /// to a thread possibly.
 // TODO: Is it possible to declare it as it should be?
 #[allow(unsafe_code, clippy::non_send_fields_in_send_ty)]
-unsafe impl<'a, T> Send for State<'a, T> where T: Send {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn receiver<T: Send>(_i: T) {}
-
-    /// We want to declare items containing pointers of StreamingPeekableIter `Send` as well, so it must be `Send` itself.
-    #[test]
-    fn streaming_peekable_iter_is_send() {
-        receiver(StreamingPeekableIter::new(Vec::<u8>::new(), &[]));
-    }
-
-    #[test]
-    fn state_is_send() {
-        let mut s = StreamingPeekableIter::new(Vec::<u8>::new(), &[]);
-        receiver(State::Idle { parent: Some(&mut s) });
-    }
-}
+unsafe impl<T> Send for State<'_, T> where T: Send {}
 
 impl<'a, T, F> WithSidebands<'a, T, F>
 where
     T: AsyncRead + Unpin,
-    F: FnMut(bool, &[u8]) + Unpin,
+    F: FnMut(bool, &[u8]) -> ProgressAction + Unpin,
 {
     /// Create a new instance with the given `parent` provider and the `handle_progress` function.
     ///
@@ -118,17 +100,17 @@ where
         }
     }
 
-    /// Forwards to the parent [StreamingPeekableIter::reset_with()]
+    /// Forwards to the parent [`StreamingPeekableIter::reset_with()`]
     pub fn reset_with(&mut self, delimiters: &'static [PacketLineRef<'static>]) {
         if let State::Idle { ref mut parent } = self.state {
             parent
                 .as_mut()
                 .expect("parent is always available if we are idle")
-                .reset_with(delimiters)
+                .reset_with(delimiters);
         }
     }
 
-    /// Forwards to the parent [StreamingPeekableIter::stopped_at()]
+    /// Forwards to the parent [`StreamingPeekableIter::stopped_at()`]
     pub fn stopped_at(&self) -> Option<PacketLineRef<'static>> {
         match self.state {
             State::Idle { ref parent } => {
@@ -146,7 +128,7 @@ where
         self.handle_progress = handle_progress;
     }
 
-    /// Effectively forwards to the parent [StreamingPeekableIter::peek_line()], allowing to see what would be returned
+    /// Effectively forwards to the parent [`StreamingPeekableIter::peek_line()`], allowing to see what would be returned
     /// next on a call to [`read_line()`][io::BufRead::read_line()].
     ///
     /// # Warning
@@ -170,7 +152,7 @@ where
     }
 
     /// Read a packet line as string line.
-    pub fn read_line<'b>(&'b mut self, buf: &'b mut String) -> ReadLineFuture<'a, 'b, T, F> {
+    pub fn read_line_to_string<'b>(&'b mut self, buf: &'b mut String) -> ReadLineFuture<'a, 'b, T, F> {
         ReadLineFuture { parent: self, buf }
     }
 
@@ -198,10 +180,10 @@ pub struct ReadDataLineFuture<'a, 'b, T: AsyncRead, F> {
     buf: &'b mut Vec<u8>,
 }
 
-impl<'a, 'b, T, F> Future for ReadDataLineFuture<'a, 'b, T, F>
+impl<T, F> Future for ReadDataLineFuture<'_, '_, T, F>
 where
     T: AsyncRead + Unpin,
-    F: FnMut(bool, &[u8]) + Unpin,
+    F: FnMut(bool, &[u8]) -> ProgressAction + Unpin,
 {
     type Output = std::io::Result<usize>;
 
@@ -225,10 +207,10 @@ pub struct ReadLineFuture<'a, 'b, T: AsyncRead, F> {
     buf: &'b mut String,
 }
 
-impl<'a, 'b, T, F> Future for ReadLineFuture<'a, 'b, T, F>
+impl<T, F> Future for ReadLineFuture<'_, '_, T, F>
 where
     T: AsyncRead + Unpin,
-    F: FnMut(bool, &[u8]) + Unpin,
+    F: FnMut(bool, &[u8]) -> ProgressAction + Unpin,
 {
     type Output = std::io::Result<usize>;
 
@@ -248,10 +230,10 @@ where
     }
 }
 
-impl<'a, T, F> AsyncBufRead for WithSidebands<'a, T, F>
+impl<T, F> AsyncBufRead for WithSidebands<'_, T, F>
 where
     T: AsyncRead + Unpin,
-    F: FnMut(bool, &[u8]) + Unpin,
+    F: FnMut(bool, &[u8]) -> ProgressAction + Unpin,
 {
     fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
         use std::io;
@@ -310,11 +292,27 @@ where
                                         }
                                         BandRef::Progress(d) => {
                                             let text = TextRef::from(d).0;
-                                            handle_progress(false, text);
+                                            match handle_progress(false, text) {
+                                                ProgressAction::Continue => {}
+                                                ProgressAction::Interrupt => {
+                                                    return Poll::Ready(Err(io::Error::new(
+                                                        std::io::ErrorKind::Other,
+                                                        "interrupted by user",
+                                                    )))
+                                                }
+                                            };
                                         }
                                         BandRef::Error(d) => {
                                             let text = TextRef::from(d).0;
-                                            handle_progress(true, text);
+                                            match handle_progress(true, text) {
+                                                ProgressAction::Continue => {}
+                                                ProgressAction::Interrupt => {
+                                                    return Poll::Ready(Err(io::Error::new(
+                                                        io::ErrorKind::Other,
+                                                        "interrupted by user",
+                                                    )))
+                                                }
+                                            };
                                         }
                                     };
                                 }
@@ -350,18 +348,34 @@ where
     }
 }
 
-impl<'a, T, F> AsyncRead for WithSidebands<'a, T, F>
+impl<T, F> AsyncRead for WithSidebands<'_, T, F>
 where
     T: AsyncRead + Unpin,
-    F: FnMut(bool, &[u8]) + Unpin,
+    F: FnMut(bool, &[u8]) -> ProgressAction + Unpin,
 {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
-        let nread = {
-            use std::io::Read;
-            let mut rem = ready!(self.as_mut().poll_fill_buf(cx))?;
-            rem.read(buf)?
-        };
+        use std::io::Read;
+        let mut rem = ready!(self.as_mut().poll_fill_buf(cx))?;
+        let nread = rem.read(buf)?;
         self.consume(nread);
         Poll::Ready(Ok(nread))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn receiver<T: Send>(_i: T) {}
+
+    /// We want to declare items containing pointers of `StreamingPeekableIter` `Send` as well, so it must be `Send` itself.
+    #[test]
+    fn streaming_peekable_iter_is_send() {
+        receiver(StreamingPeekableIter::new(Vec::<u8>::new(), &[], false));
+    }
+
+    #[test]
+    fn state_is_send() {
+        let mut s = StreamingPeekableIter::new(Vec::<u8>::new(), &[], false);
+        receiver(State::Idle { parent: Some(&mut s) });
     }
 }

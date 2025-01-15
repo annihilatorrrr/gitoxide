@@ -8,6 +8,7 @@ use std::{
 use bstr::ByteSlice;
 #[cfg(feature = "async-client")]
 use futures_lite::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
+use gix_packetline::read::ProgressAction;
 use gix_transport::{
     client,
     client::{git, Transport, TransportV2Ext, TransportWithoutIO},
@@ -27,6 +28,7 @@ async fn handshake_v1_and_request() -> crate::Result {
         "/foo.git",
         Some(("example.org", None)),
         git::ConnectMode::Daemon,
+        false,
     );
     assert!(
         c.connection_persists_across_multiple_requests(),
@@ -71,7 +73,7 @@ async fn handshake_v1_and_request() -> crate::Result {
     let mut refs = Vec::new();
     #[allow(clippy::while_let_on_iterator)] // needed in async version of test
     while let Some(line) = lines.next().await {
-        refs.push(line?)
+        refs.push(line?);
     }
     #[allow(clippy::drop_non_drop)] // needed for non-async version
     drop(lines);
@@ -85,7 +87,7 @@ async fn handshake_v1_and_request() -> crate::Result {
     );
     drop(res);
 
-    let writer = c.request(client::WriteMode::Binary, client::MessageKind::Flush)?;
+    let writer = c.request(client::WriteMode::Binary, client::MessageKind::Flush, false)?;
     let nak_line = writer
         .into_read()
         .await?
@@ -98,6 +100,7 @@ async fn handshake_v1_and_request() -> crate::Result {
     let mut writer = c.request(
         client::WriteMode::OneLfTerminatedLinePerWriteCall,
         client::MessageKind::Text(b"done"),
+        false,
     )?;
 
     writer.write_all(b"hello").await?;
@@ -112,7 +115,8 @@ async fn handshake_v1_and_request() -> crate::Result {
             sb.deref()
                 .lock()
                 .expect("no poison")
-                .push(std::str::from_utf8(data).expect("valid utf8").to_owned())
+                .push(std::str::from_utf8(data).expect("valid utf8").to_owned());
+            ProgressAction::Continue
         }
     })));
 
@@ -156,9 +160,10 @@ async fn push_v1_simulated() -> crate::Result {
         "/foo.git",
         Some(("example.org", None)),
         git::ConnectMode::Process,
+        false,
     );
 
-    let mut writer = c.request(client::WriteMode::Binary, client::MessageKind::Flush)?;
+    let mut writer = c.request(client::WriteMode::Binary, client::MessageKind::Flush, false)?;
     let expected = fixture_bytes("v1/push.request");
     writer.write_all(b"7c09ba0c4c3680af369bda4fc8e3c58d3fccdc76 32690d87d3943c7c0dda81246d0cde344ca7e633 refs/heads/main\0 report-status-v2 side-band-64k object-format=sha1 agent=git/2.37.1.(Apple.Git-137.1)").await?;
     writer.write_message(client::MessageKind::Flush).await?;
@@ -174,14 +179,15 @@ async fn push_v1_simulated() -> crate::Result {
                 sb.deref()
                     .lock()
                     .expect("no panic in other threads")
-                    .push(std::str::from_utf8(data).expect("valid utf8").to_owned())
+                    .push(std::str::from_utf8(data).expect("valid utf8").to_owned());
+                ProgressAction::Continue
             }
         })));
         let mut lines = read.lines();
         let mut info = Vec::new();
         #[allow(clippy::while_let_on_iterator)] // needed in async version of test
         while let Some(line) = lines.next().await {
-            info.push(line?)
+            info.push(line?);
         }
         assert_eq!(
             info,
@@ -220,6 +226,7 @@ async fn handshake_v1_process_mode() -> crate::Result {
         "/foo.git",
         Some(("example.org", None)),
         git::ConnectMode::Process,
+        false,
     );
     c.handshake(Service::UploadPack, &[]).await?;
 
@@ -242,6 +249,7 @@ async fn handshake_v2_downgrade_to_v1() -> crate::Result {
         "/bar.git",
         Some(("example.org", None)),
         git::ConnectMode::Daemon,
+        false,
     );
     let res = c.handshake(Service::UploadPack, &[]).await?;
     assert_eq!(res.actual_protocol, Protocol::V1);
@@ -288,6 +296,7 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
         "/bar.git",
         Some(("example.org", None)),
         git::ConnectMode::Daemon,
+        false,
     );
     assert!(
         c.connection_persists_across_multiple_requests(),
@@ -322,7 +331,7 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
             "ls-refs",
             [("agent", Some("git/2.28.0")), ("object-format", Some("sha1"))]
                 .iter()
-                .cloned(),
+                .copied(),
             Some(
                 [
                     "peel",
@@ -334,6 +343,7 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
                 .iter()
                 .map(|s| s.as_bytes().as_bstr().to_owned()),
             ),
+            false,
         )
         .await?;
 
@@ -341,7 +351,7 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
     let mut refs = Vec::new();
     #[allow(clippy::while_let_on_iterator)] // needed in async version of test
     while let Some(line) = lines.next().await {
-        refs.push(line?)
+        refs.push(line?);
     }
     assert_eq!(
         refs,
@@ -361,7 +371,7 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
                 ("object-format", Some("sha1")),
             ]
             .iter()
-            .cloned(),
+            .copied(),
             Some(
                 [
                     "thin-pack",
@@ -372,6 +382,7 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
                 .iter()
                 .map(|s| s.as_bytes().as_bstr().to_owned()),
             ),
+            false,
         )
         .await?;
 
@@ -387,7 +398,8 @@ async fn handshake_v2_and_request_inner() -> crate::Result {
             sb.deref()
                 .lock()
                 .expect("no poison")
-                .push(std::str::from_utf8(data).expect("valid utf8").to_owned())
+                .push(std::str::from_utf8(data).expect("valid utf8").to_owned());
+            ProgressAction::Continue
         }
     })));
 

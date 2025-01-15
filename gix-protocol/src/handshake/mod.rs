@@ -1,9 +1,11 @@
 use bstr::BString;
-use gix_transport::client::Capabilities;
+
+///
+pub mod refs;
 
 /// A git reference, commonly referred to as 'ref', as returned by a git server before sending a pack.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Ref {
     /// A ref pointing to a `tag` object, which in turns points to an `object`, usually a commit
     Peeled {
@@ -21,7 +23,7 @@ pub enum Ref {
         /// The hash of the object the ref points to.
         object: gix_hash::ObjectId,
     },
-    /// A symbolic ref pointing to `target` ref, which in turn points to an `object`
+    /// A symbolic ref pointing to `target` ref, which in turn, ultimately after possibly following `tag`, points to an `object`
     Symbolic {
         /// The name at which the symbolic ref is located, like `HEAD`.
         full_ref_name: BString,
@@ -29,9 +31,13 @@ pub enum Ref {
         ///
         /// See issue [#205] for details
         ///
-        /// [#205]: https://github.com/Byron/gitoxide/issues/205
+        /// [#205]: https://github.com/GitoxideLabs/gitoxide/issues/205
         target: BString,
-        /// The hash of the object the `target` ref points to.
+        /// The hash of the annotated tag the ref points to, if present.
+        ///
+        /// Note that this field is also `None` if `full_ref_name` is a lightweight tag.
+        tag: Option<gix_hash::ObjectId>,
+        /// The hash of the object the `target` ref ultimately points to.
         object: gix_hash::ObjectId,
     },
     /// A ref is unborn on the remote and just points to the initial, unborn branch, as is the case in a newly initialized repository
@@ -46,16 +52,21 @@ pub enum Ref {
 
 /// The result of the [`handshake()`][super::handshake()] function.
 #[derive(Default, Debug, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg(feature = "handshake")]
 pub struct Outcome {
     /// The protocol version the server responded with. It might have downgraded the desired version.
     pub server_protocol_version: gix_transport::Protocol,
-    /// The references reported as part of the Protocol::V1 handshake, or `None` otherwise as V2 requires a separate request.
+    /// The references reported as part of the `Protocol::V1` handshake, or `None` otherwise as V2 requires a separate request.
     pub refs: Option<Vec<Ref>>,
+    /// Shallow updates as part of the `Protocol::V1`, to shallow a particular object.
+    /// Note that unshallowing isn't supported here.
+    pub v1_shallow_updates: Option<Vec<crate::fetch::response::ShallowUpdate>>,
     /// The server capabilities.
-    pub capabilities: Capabilities,
+    pub capabilities: gix_transport::client::Capabilities,
 }
 
+#[cfg(feature = "handshake")]
 mod error {
     use bstr::BString;
     use gix_transport::client;
@@ -68,6 +79,8 @@ mod error {
     pub enum Error {
         #[error("Failed to obtain credentials")]
         Credentials(#[from] credentials::protocol::Error),
+        #[error("No credentials were returned at all as if the credential helper isn't functioning unknowingly")]
+        EmptyCredentials,
         #[error("Credentials provided for \"{url}\" were not accepted by the remote")]
         InvalidCredentials { url: BString, source: std::io::Error },
         #[error(transparent)]
@@ -87,9 +100,9 @@ mod error {
         }
     }
 }
+#[cfg(feature = "handshake")]
 pub use error::Error;
 
+#[cfg(any(feature = "blocking-client", feature = "async-client"))]
+#[cfg(feature = "handshake")]
 pub(crate) mod function;
-
-///
-pub mod refs;

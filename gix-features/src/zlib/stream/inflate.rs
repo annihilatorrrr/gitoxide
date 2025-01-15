@@ -2,23 +2,6 @@ use std::{io, io::BufRead};
 
 use flate2::{Decompress, FlushDecompress, Status};
 
-/// The boxed variant is faster for what we do (moving the decompressor in and out a lot)
-pub struct ReadBoxed<R> {
-    /// The reader from which bytes should be decompressed.
-    pub inner: R,
-    /// The decompressor doing all the work.
-    pub decompressor: Box<Decompress>,
-}
-
-impl<R> io::Read for ReadBoxed<R>
-where
-    R: BufRead,
-{
-    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
-        read(&mut self.inner, &mut self.decompressor, into)
-    }
-}
-
 /// Read bytes from `rd` and decompress them using `state` into a pre-allocated fitting buffer `dst`, returning the amount of bytes written.
 pub fn read(rd: &mut impl BufRead, state: &mut Decompress, mut dst: &mut [u8]) -> io::Result<usize> {
     let mut total_written = 0;
@@ -46,11 +29,11 @@ pub fn read(rd: &mut impl BufRead, state: &mut Decompress, mut dst: &mut [u8]) -
             // The stream has officially ended, nothing more to do here.
             Ok(Status::StreamEnd) => return Ok(total_written),
             // Either input our output are depleted even though the stream is not depleted yet.
-            Ok(Status::Ok) | Ok(Status::BufError) if eof || dst.is_empty() => return Ok(total_written),
+            Ok(Status::Ok | Status::BufError) if eof || dst.is_empty() => return Ok(total_written),
             // Some progress was made in both the input and the output, it must continue to reach the end.
-            Ok(Status::Ok) | Ok(Status::BufError) if consumed != 0 || written != 0 => continue,
+            Ok(Status::Ok | Status::BufError) if consumed != 0 || written != 0 => continue,
             // A strange state, where zlib makes no progress but isn't done either. Call it out.
-            Ok(Status::Ok) | Ok(Status::BufError) => unreachable!("Definitely a bug somewhere"),
+            Ok(Status::Ok | Status::BufError) => unreachable!("Definitely a bug somewhere"),
             Err(..) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "corrupt deflate stream")),
         }
     }

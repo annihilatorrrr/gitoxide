@@ -1,11 +1,13 @@
 use gix_odb::pack;
+use gix_testtools::size_ok;
 
 #[test]
 fn size_of_entry() {
-    assert_eq!(
-        std::mem::size_of::<pack::data::input::Entry>(),
-        104,
-        "let's keep the size in check as we have many of them"
+    let actual = std::mem::size_of::<pack::data::input::Entry>();
+    let expected = 104;
+    assert!(
+        size_ok(actual, expected),
+        "let's keep the size in check as we have many of them: {actual} <~ {expected}"
     );
 }
 
@@ -37,7 +39,7 @@ mod new_from_header {
                 let mut buf = Vec::<u8>::new();
                 entry.header.write_to(entry.decompressed_size, &mut buf)?;
                 let new_entry =
-                    pack::data::Entry::from_bytes(&buf, entry.pack_offset, gix_hash::Kind::Sha1.len_in_bytes());
+                    pack::data::Entry::from_bytes(&buf, entry.pack_offset, gix_hash::Kind::Sha1.len_in_bytes())?;
 
                 assert_eq!(
                     new_entry.header_size(),
@@ -45,7 +47,7 @@ mod new_from_header {
                     "it should consume all provided bytes"
                 );
                 assert_eq!(
-                    new_entry.decompressed_size, entry.decompressed_size as u64,
+                    new_entry.decompressed_size, entry.decompressed_size,
                     "decoded size must match"
                 );
                 assert_eq!(new_entry.header, entry.header, "headers match after roundtrip");
@@ -131,7 +133,7 @@ mod new_from_header {
             gix_hash::Kind::Sha1,
         )?;
         let mut num_objects = 0;
-        while let Some(entry) = iter.next() {
+        for entry in iter.by_ref() {
             let entry = entry?;
             num_objects += 1;
             assert!(

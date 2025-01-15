@@ -6,26 +6,25 @@ use gix_index::{
     Version,
 };
 
-use crate::{hex_to_id, loose_file_path};
+use crate::{hex_to_id, index::Fixture, loose_file_path};
 
 fn verify(index: gix_index::File) -> gix_index::File {
     index.verify_integrity().unwrap();
     index.verify_entries().unwrap();
-    index
-        .verify_extensions(false, gix_index::verify::extensions::no_find)
-        .unwrap();
+    index.verify_extensions(false, gix_object::find::Never).unwrap();
     index
 }
 
 pub(crate) fn loose_file(name: &str) -> gix_index::File {
     let path = loose_file_path(name);
-    let file = gix_index::File::at(path, gix_hash::Kind::Sha1, Default::default()).unwrap();
+    let file = gix_index::File::at(path, gix_hash::Kind::Sha1, false, Default::default()).unwrap();
     verify(file)
 }
 pub(crate) fn try_file(name: &str) -> Result<gix_index::File, gix_index::file::init::Error> {
     let file = gix_index::File::at(
         crate::fixture_index_path(name),
         gix_hash::Kind::Sha1,
+        false,
         Default::default(),
     )?;
     Ok(verify(file))
@@ -34,7 +33,7 @@ pub(crate) fn file(name: &str) -> gix_index::File {
     try_file(name).unwrap()
 }
 fn file_opt(name: &str, opts: gix_index::decode::Options) -> gix_index::File {
-    let file = gix_index::File::at(crate::fixture_index_path(name), gix_hash::Kind::Sha1, opts).unwrap();
+    let file = gix_index::File::at(crate::fixture_index_path(name), gix_hash::Kind::Sha1, false, opts).unwrap();
     verify(file)
 }
 
@@ -75,6 +74,28 @@ fn v2_empty() {
     assert!(tree.name.is_empty());
     assert!(tree.children.is_empty());
     assert_eq!(tree.id, hex_to_id("4b825dc642cb6eb9a060e54bf8d69288fbee4904"));
+    assert_eq!(
+        file.checksum(),
+        Some(hex_to_id("72d53f787d86a932a25a8537cee236d81846a8f1")),
+        "checksums are read but not validated by default"
+    );
+}
+
+#[test]
+fn v2_empty_skip_hash() {
+    let file = loose_file("skip_hash");
+    assert_eq!(file.version(), Version::V2);
+    assert_eq!(file.entries().len(), 0);
+    let tree = file.tree().unwrap();
+    assert_eq!(tree.num_entries.unwrap_or_default(), 0);
+    assert!(tree.name.is_empty());
+    assert!(tree.children.is_empty());
+    assert_eq!(tree.id, hex_to_id("4b825dc642cb6eb9a060e54bf8d69288fbee4904"));
+    assert_eq!(
+        file.checksum(),
+        None,
+        "unset checksums are represented in the type system"
+    );
 }
 
 #[test]
@@ -88,7 +109,7 @@ fn v2_with_multiple_entries_without_eoie_ext() {
         assert_eq!(e.path(&file), path);
         assert!(e.flags.is_empty());
         assert_eq!(e.mode, entry::Mode::FILE);
-        assert_eq!(e.id, hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"))
+        assert_eq!(e.id, hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"));
     }
 
     let tree = file.tree().unwrap();
@@ -118,6 +139,7 @@ fn split_index_without_any_extension() {
     let file = gix_index::File::at(
         find_shared_index_for(crate::fixture_index_path("v2_split_index")),
         gix_hash::Kind::Sha1,
+        false,
         Default::default(),
     )
     .unwrap();
@@ -151,7 +173,7 @@ fn v2_very_long_path() {
     assert_eq!(tree.num_entries, None, "root tree has invalid entries actually");
     assert_eq!(tree.name.as_bstr(), "");
     assert_eq!(tree.num_entries, None, "it's marked invalid actually");
-    assert!(tree.id.is_null(), "there is no id for the root")
+    assert!(tree.id.is_null(), "there is no id for the root");
 }
 
 #[test]
@@ -187,6 +209,14 @@ fn fsmn_v1() {
 }
 
 #[test]
+fn v3_added_files() {
+    let file = Fixture::Generated("v3_added_files").open();
+    assert_eq!(file.version(), Version::V3, "uses extended attributes");
+    assert_eq!(file.entries().len(), 1);
+    assert_eq!(file.entries()[0].flags, Flags::EXTENDED | Flags::INTENT_TO_ADD);
+}
+
+#[test]
 fn file_with_conflicts() {
     let file = loose_file("conflicting-file");
     assert_eq!(file.version(), Version::V2);
@@ -197,6 +227,8 @@ fn file_with_conflicts() {
 fn v4_with_delta_paths_and_ieot_ext() {
     let file = file("v4_more_files_IEOT");
     assert_eq!(file.version(), Version::V4);
+    assert!(file.had_end_of_index_marker());
+    assert!(file.had_offset_table());
 
     assert_eq!(file.entries().len(), 10);
     for (idx, path) in [
@@ -218,7 +250,7 @@ fn v4_with_delta_paths_and_ieot_ext() {
         assert_eq!(e.path(&file), path);
         assert!(e.flags.is_empty());
         assert_eq!(e.mode, entry::Mode::FILE);
-        assert_eq!(e.id, hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"))
+        assert_eq!(e.id, hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"));
     }
 }
 
@@ -307,8 +339,15 @@ fn split_index_and_regular_index_of_same_content_are_indeed_the_same() {
     )
     .unwrap();
 
-    let split =
-        verify(gix_index::File::at(base.join("split/.git/index"), gix_hash::Kind::Sha1, Default::default()).unwrap());
+    let split = verify(
+        gix_index::File::at(
+            base.join("split/.git/index"),
+            gix_hash::Kind::Sha1,
+            false,
+            Default::default(),
+        )
+        .unwrap(),
+    );
 
     assert!(
         split.link().is_none(),
@@ -319,6 +358,7 @@ fn split_index_and_regular_index_of_same_content_are_indeed_the_same() {
         gix_index::File::at(
             base.join("regular/.git/index"),
             gix_hash::Kind::Sha1,
+            false,
             Default::default(),
         )
         .unwrap(),
@@ -333,5 +373,5 @@ fn split_index_and_regular_index_of_same_content_are_indeed_the_same() {
         assert_eq!(s.id, r.id);
         assert_eq!(s.flags, r.flags);
         assert_eq!(s.path_in(split.path_backing()), r.path_in(regular.path_backing()));
-    })
+    });
 }

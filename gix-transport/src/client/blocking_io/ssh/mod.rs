@@ -1,5 +1,7 @@
 use std::process::Stdio;
 
+use gix_url::ArgumentSafety::*;
+
 use crate::{client::blocking_io, Protocol};
 
 /// The error used in [`connect()`].
@@ -8,6 +10,8 @@ use crate::{client::blocking_io, Protocol};
 pub enum Error {
     #[error("The scheme in \"{}\" is not usable for an ssh connection", .0.to_bstring())]
     UnsupportedScheme(gix_url::Url),
+    #[error("Host name '{host}' could be mistaken for a command-line argument")]
+    AmbiguousHostName { host: String },
 }
 
 impl crate::IsSpuriousError for Error {}
@@ -37,12 +41,19 @@ pub mod invocation {
 
     /// The error returned when producing ssh invocation arguments based on a selected invocation kind.
     #[derive(Debug, thiserror::Error)]
-    #[error("The 'Simple' ssh variant doesn't support {function}")]
-    pub struct Error {
-        /// The simple command that should have been invoked.
-        pub command: OsString,
-        /// The function that was unsupported
-        pub function: &'static str,
+    #[allow(missing_docs)]
+    pub enum Error {
+        #[error("Username '{user}' could be mistaken for a command-line argument")]
+        AmbiguousUserName { user: String },
+        #[error("Host name '{host}' could be mistaken for a command-line argument")]
+        AmbiguousHostName { host: String },
+        #[error("The 'Simple' ssh variant doesn't support {function}")]
+        Unsupported {
+            /// The simple command that should have been invoked.
+            command: OsString,
+            /// The function that was unsupported
+            function: &'static str,
+        },
     }
 }
 
@@ -86,10 +97,13 @@ pub mod connect {
 ///
 /// The `desired_version` is the preferred protocol version when establishing the connection, but note that it can be
 /// downgraded by servers not supporting it.
+/// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
+#[allow(clippy::result_large_err)]
 pub fn connect(
     url: gix_url::Url,
     desired_version: Protocol,
     options: connect::Options,
+    trace: bool,
 ) -> Result<blocking_io::file::SpawnProcessOnDemand, Error> {
     if url.scheme != gix_url::Scheme::Ssh || url.host().is_none() {
         return Err(Error::UnsupportedScheme(url));
@@ -97,19 +111,21 @@ pub fn connect(
     let ssh_cmd = options.ssh_command();
     let mut kind = options.kind.unwrap_or_else(|| ProgramKind::from(ssh_cmd));
     if options.kind.is_none() && kind == ProgramKind::Simple {
-        kind = if std::process::Command::from(
+        let mut cmd = std::process::Command::from(
             gix_command::prepare(ssh_cmd)
                 .stderr(Stdio::null())
                 .stdout(Stdio::null())
                 .stdin(Stdio::null())
                 .with_shell()
                 .arg("-G")
-                .arg(url.host().expect("always set for ssh urls")),
-        )
-        .status()
-        .ok()
-        .map_or(false, |status| status.success())
-        {
+                .arg(match url.host_as_argument() {
+                    Usable(host) => host,
+                    Dangerous(host) => Err(Error::AmbiguousHostName { host: host.into() })?,
+                    Absent => panic!("BUG: host should always be present in SSH URLs"),
+                }),
+        );
+        gix_features::trace::debug!(cmd = ?cmd, "invoking `ssh` for feature check");
+        kind = if cmd.status().ok().is_some_and(|status| status.success()) {
             ProgramKind::Ssh
         } else {
             ProgramKind::Simple
@@ -124,6 +140,7 @@ pub fn connect(
         kind,
         options.disallow_shell,
         desired_version,
+        trace,
     ))
 }
 

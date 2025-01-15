@@ -1,10 +1,12 @@
 use std::{
-    convert::TryInto,
     fmt::{Debug, Formatter},
     path::Path,
 };
 
-use crate::file::{self, commit::Commit, File, COMMIT_DATA_ENTRY_SIZE_SANS_HASH};
+use crate::{
+    file::{self, commit::Commit, COMMIT_DATA_ENTRY_SIZE_SANS_HASH},
+    File,
+};
 
 /// Access
 impl File {
@@ -13,9 +15,9 @@ impl File {
         self.base_graph_count
     }
 
-    /// Returns the commit data for the commit located at the given lexigraphical position.
+    /// Returns the commit data for the commit located at the given lexicographical position.
     ///
-    /// `pos` must range from 0 to self.num_commits().
+    /// `pos` must range from 0 to `self.num_commits()`.
     ///
     /// # Panics
     ///
@@ -32,12 +34,12 @@ impl File {
     }
 
     /// Returns an object id at the given index in our list of (sorted) hashes.
-    /// The position ranges from 0 to self.num_commits()
+    /// The position ranges from 0 to `self.num_commits()`
     // copied from gix-odb/src/pack/index/ext
     pub fn id_at(&self, pos: file::Position) -> &gix_hash::oid {
         assert!(
             pos.0 < self.num_commits(),
-            "expected lexigraphical position less than {}, got {}",
+            "expected lexicographical position less than {}, got {}",
             self.num_commits(),
             pos.0
         );
@@ -54,7 +56,7 @@ impl File {
         let start = self.base_graphs_list_offset.unwrap_or(0);
         let base_graphs_list = &self.data[start..][..self.hash_len * usize::from(self.base_graph_count)];
         base_graphs_list
-            .chunks(self.hash_len)
+            .chunks_exact(self.hash_len)
             .map(gix_hash::oid::from_bytes_unchecked)
     }
 
@@ -71,7 +73,10 @@ impl File {
     /// Translate the given object hash to its position within this file, if present.
     // copied from gix-odb/src/pack/index/ext
     pub fn lookup(&self, id: impl AsRef<gix_hash::oid>) -> Option<file::Position> {
-        let id = id.as_ref();
+        self.lookup_inner(id.as_ref())
+    }
+
+    fn lookup_inner(&self, id: &gix_hash::oid) -> Option<file::Position> {
         let first_byte = usize::from(id.first_byte());
         let mut upper_bound = self.fan[first_byte];
         let mut lower_bound = if first_byte != 0 { self.fan[first_byte - 1] } else { 0 };
@@ -109,7 +114,7 @@ impl File {
     pub(crate) fn commit_data_bytes(&self, pos: file::Position) -> &[u8] {
         assert!(
             pos.0 < self.num_commits(),
-            "expected lexigraphical position less than {}, got {}",
+            "expected lexicographical position less than {}, got {}",
             self.num_commits(),
             pos.0
         );

@@ -1,11 +1,17 @@
-use std::path::Path;
-
-use gix_tempfile::{AutoRemove, ContainingDirectory};
-
+#[cfg(not(feature = "interrupt"))]
 fn main() -> anyhow::Result<()> {
-    gix::interrupt::init_handler(|| {})?;
+    anyhow::bail!("Needs 'interrupt' feature toggle to be enabled");
+}
+
+#[cfg(feature = "interrupt")]
+fn main() -> anyhow::Result<()> {
+    use gix_tempfile::{AutoRemove, ContainingDirectory};
+    // SAFETY: The closure doesn't use mutexes or memory allocation, so it should be safe to call from a signal handler.
+    unsafe {
+        gix::interrupt::init_handler(1, || {})?;
+    }
     eprintln!("About to emit the first term signal");
-    let tempfile_path = Path::new("example-file.tmp");
+    let tempfile_path = std::path::Path::new("example-file.tmp");
     let _keep_tempfile = gix_tempfile::mark_at(tempfile_path, ContainingDirectory::Exists, AutoRemove::Tempfile)?;
 
     signal_hook::low_level::raise(signal_hook::consts::SIGTERM)?;

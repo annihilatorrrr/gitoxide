@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use std::{borrow::Cow, convert::TryFrom, fmt::Display, str::FromStr};
+use std::{borrow::Cow, fmt::Display, str::FromStr};
 
 use bstr::{BStr, BString};
 
@@ -18,7 +18,7 @@ impl Display for Color {
                 write!(f, " ")?;
             }
             bg.fmt(f)?;
-            write_space = Some(())
+            write_space = Some(());
         }
 
         if !self.attributes.is_empty() {
@@ -99,7 +99,7 @@ impl TryFrom<Cow<'_, BStr>> for Color {
 
 /// Discriminating enum for names of [`Color`] values.
 ///
-/// `gix-config` supports the eight standard colors, their bright variants, an
+/// `git-config` supports the eight standard colors, their bright variants, an
 /// ANSI color code, or a 24-bit hex value prefixed with an octothorpe/hash.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[allow(missing_docs)]
@@ -204,7 +204,7 @@ impl FromStr for Name {
         }
 
         if let Some(s) = s.strip_prefix('#') {
-            if s.len() == 6 {
+            if s.len() == 6 && s.is_char_boundary(2) && s.is_char_boundary(4) && s.is_char_boundary(6) {
                 let rgb = (
                     u8::from_str_radix(&s[..2], 16),
                     u8::from_str_radix(&s[2..4], 16),
@@ -232,10 +232,10 @@ impl TryFrom<&BStr> for Name {
 bitflags::bitflags! {
     /// Discriminating enum for [`Color`] attributes.
     ///
-    /// `gix-config` supports modifiers and their negators. The negating color
+    /// `git-config` supports modifiers and their negators. The negating color
     /// attributes are equivalent to having a `no` or `no-` prefix to the normal
     /// variant.
-    #[derive(Default)]
+    #[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
     pub struct Attribute: u32 {
         const BOLD = 1 << 1;
         const DIM = 1 << 2;
@@ -267,7 +267,7 @@ impl Display for Attribute {
             };
             if self.contains(attr) {
                 if write_space.take().is_some() {
-                    write!(f, " ")?
+                    write!(f, " ")?;
                 }
                 match attr {
                     Attribute::RESET => write!(f, "reset"),

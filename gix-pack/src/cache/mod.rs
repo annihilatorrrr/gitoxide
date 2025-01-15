@@ -28,7 +28,7 @@ impl DecodeEntry for Never {
 
 impl<T: DecodeEntry + ?Sized> DecodeEntry for Box<T> {
     fn put(&mut self, pack_id: u32, offset: u64, data: &[u8], kind: Kind, compressed_size: usize) {
-        self.deref_mut().put(pack_id, offset, data, kind, compressed_size)
+        self.deref_mut().put(pack_id, offset, data, kind, compressed_size);
     }
 
     fn get(&mut self, pack_id: u32, offset: u64, out: &mut Vec<u8>) -> Option<(Kind, usize)> {
@@ -53,3 +53,19 @@ pub mod object;
 
 ///
 pub(crate) mod delta;
+
+/// Replaces content of the given `Vec` with the slice. The vec will have the same length
+/// as the slice. The vec can be either `&mut Vec` or `Vec`.
+/// Returns `None` if no memory could be allocated.
+#[cfg(any(
+    feature = "pack-cache-lru-static",
+    feature = "pack-cache-lru-dynamic",
+    feature = "object-cache-dynamic"
+))]
+fn set_vec_to_slice<V: std::borrow::BorrowMut<Vec<u8>>>(mut vec: V, source: &[u8]) -> Option<V> {
+    let out = vec.borrow_mut();
+    out.clear();
+    out.try_reserve(source.len()).ok()?;
+    out.extend_from_slice(source);
+    Some(vec)
+}

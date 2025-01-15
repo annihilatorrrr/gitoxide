@@ -1,7 +1,7 @@
 //! git-style registered tempfiles that are removed upon typical termination signals.
 //!
 //! To register signal handlers in a typical application that doesn't have its own, call
-//! [`gix_tempfile::setup(Default::default())`][setup()] before creating the first tempfile.
+//! [`gix_tempfile::signal::setup(Default::default())`][signal::setup()] before creating the first tempfile.
 //!
 //! Signal handlers are powered by [`signal-hook`] to get notified when the application is told to shut down
 //! to assure tempfiles are deleted. The deletion is filtered by process id to allow forks to have their own
@@ -9,11 +9,12 @@
 //!
 //! ### Initial Setup
 //!
-//! As no handlers for `TERMination` are installed, it is required to call [`setup()`] before creating the first tempfile.
-//! This also allows to control how `git-tempfiles` integrates with other handlers under application control.
+//! As no handlers for `TERMination` are installed, it is required to call [`signal::setup()`] before creating
+//! the first tempfile. This also allows to control how this crate integrates with
+//! other handlers under application control.
 //!
 //! As a general rule of thumb, use `Default::default()` as argument to emulate the default behaviour and
-//! abort the process after cleaning temporary files. Read more about options in [SignalHandlerMode].
+//! abort the process after cleaning temporary files. Read more about options in [`signal::handler::Mode`].
 //!
 //! # Limitations
 //!
@@ -23,7 +24,14 @@
 //! * The application is performing a write operation on the tempfile when a signal arrives, preventing this tempfile to be removed,
 //!   but not others. Any other operation dealing with the tempfile suffers from the same issue.
 //!
-//! [signal-hook]: https://docs.rs/signal-hook
+//! [`signal-hook`]: https://docs.rs/signal-hook
+//!
+//! ## Feature Flags
+#![cfg_attr(
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
+)]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 use std::{
@@ -33,13 +41,65 @@ use std::{
     sync::atomic::AtomicUsize,
 };
 
-use dashmap::DashMap;
 use once_cell::sync::Lazy;
 
-mod fs;
-pub use fs::{create_dir, remove_dir};
+#[cfg(feature = "hp-hashmap")]
+type HashMap<K, V> = dashmap::DashMap<K, V>;
 
-pub mod handler;
+#[cfg(not(feature = "hp-hashmap"))]
+mod hashmap {
+    use std::collections::HashMap;
+
+    use parking_lot::Mutex;
+
+    // TODO(performance): use the `gix-hashtable` slot-map once available. It seems quite fast already though, so experiment.
+    pub struct Concurrent<K, V> {
+        inner: Mutex<HashMap<K, V>>,
+    }
+
+    impl<K, V> Default for Concurrent<K, V>
+    where
+        K: Eq + std::hash::Hash,
+    {
+        fn default() -> Self {
+            Concurrent {
+                inner: Default::default(),
+            }
+        }
+    }
+
+    impl<K, V> Concurrent<K, V>
+    where
+        K: Eq + std::hash::Hash + Clone,
+    {
+        pub fn insert(&self, key: K, value: V) -> Option<V> {
+            self.inner.lock().insert(key, value)
+        }
+
+        pub fn remove(&self, key: &K) -> Option<(K, V)> {
+            self.inner.lock().remove(key).map(|v| (key.clone(), v))
+        }
+
+        pub fn for_each<F>(&self, cb: F)
+        where
+            Self: Sized,
+            F: FnMut(&mut V),
+        {
+            if let Some(mut guard) = self.inner.try_lock() {
+                guard.values_mut().for_each(cb);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "hp-hashmap"))]
+type HashMap<K, V> = hashmap::Concurrent<K, V>;
+
+pub use gix_fs::dir::{create as create_dir, remove as remove_dir};
+
+/// signal setup and reusable handlers.
+#[cfg(feature = "signals")]
+pub mod signal;
 
 mod forksafe;
 use forksafe::ForksafeTempfile;
@@ -47,55 +107,31 @@ use forksafe::ForksafeTempfile;
 pub mod handle;
 use crate::handle::{Closed, Writable};
 
-static SIGNAL_HANDLER_MODE: AtomicUsize = AtomicUsize::new(SignalHandlerMode::None as usize);
+///
+pub mod registry;
+
 static NEXT_MAP_INDEX: AtomicUsize = AtomicUsize::new(0);
-static REGISTER: Lazy<DashMap<usize, Option<ForksafeTempfile>>> = Lazy::new(|| {
-    let mode = SIGNAL_HANDLER_MODE.load(std::sync::atomic::Ordering::SeqCst);
-    if mode != SignalHandlerMode::None as usize {
+static REGISTRY: Lazy<HashMap<usize, Option<ForksafeTempfile>>> = Lazy::new(|| {
+    #[cfg(feature = "signals")]
+    if signal::handler::MODE.load(std::sync::atomic::Ordering::SeqCst) != signal::handler::Mode::None as usize {
         for sig in signal_hook::consts::TERM_SIGNALS {
             // SAFETY: handlers are considered unsafe because a lot can go wrong. See `cleanup_tempfiles()` for details on safety.
             #[allow(unsafe_code)]
             unsafe {
                 #[cfg(not(windows))]
                 {
-                    signal_hook_registry::register_sigaction(*sig, handler::cleanup_tempfiles_nix)
+                    signal_hook_registry::register_sigaction(*sig, signal::handler::cleanup_tempfiles_nix)
                 }
                 #[cfg(windows)]
                 {
-                    signal_hook::low_level::register(*sig, handler::cleanup_tempfiles_windows)
+                    signal_hook::low_level::register(*sig, signal::handler::cleanup_tempfiles_windows)
                 }
             }
             .expect("signals can always be installed");
         }
     }
-    DashMap::new()
+    HashMap::default()
 });
-
-/// Define how our signal handlers act
-#[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
-pub enum SignalHandlerMode {
-    /// Do not install a signal handler at all, but have somebody else call our handler directly.
-    None = 0,
-    /// Delete all remaining registered tempfiles on termination.
-    DeleteTempfilesOnTermination = 1,
-    /// Delete all remaining registered tempfiles on termination and emulate the default handler behaviour.
-    ///
-    /// This typically leads to the process being aborted.
-    DeleteTempfilesOnTerminationAndRestoreDefaultBehaviour = 2,
-}
-
-impl Default for SignalHandlerMode {
-    /// By default we will emulate the default behaviour and abort the process.
-    ///
-    /// While testing, we will not abort the process.
-    fn default() -> Self {
-        if cfg!(test) {
-            SignalHandlerMode::DeleteTempfilesOnTermination
-        } else {
-            SignalHandlerMode::DeleteTempfilesOnTerminationAndRestoreDefaultBehaviour
-        }
-    }
-}
 
 /// A type expressing the ways we can deal with directories containing a tempfile.
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
@@ -171,6 +207,16 @@ pub fn writable_at(
     Handle::<Writable>::at(path, directory, cleanup)
 }
 
+/// Like [`writable_at`], but allows to set the given filesystem `permissions`.
+pub fn writable_at_with_permissions(
+    path: impl AsRef<Path>,
+    directory: ContainingDirectory,
+    cleanup: AutoRemove,
+    permissions: std::fs::Permissions,
+) -> io::Result<Handle<Writable>> {
+    Handle::<Writable>::at_with_permissions(path, directory, cleanup, permissions)
+}
+
 /// A shortcut to [`Handle::<Closed>::at()`] providing a closed temporary file to mark the presence of something.
 pub fn mark_at(
     path: impl AsRef<Path>,
@@ -180,26 +226,12 @@ pub fn mark_at(
     Handle::<Closed>::at(path, directory, cleanup)
 }
 
-/// Initialize signal handlers and other state to keep track of tempfiles, and **must be called before the first tempfile is created**,
-/// allowing to set the `mode` in which signal handlers are installed.
-///
-/// Only has an effect the first time it is called.
-///
-/// Note that it is possible to not call this function and instead call [handler::cleanup_tempfiles()][crate::handler::cleanup_tempfiles()]
-/// from a handler under the applications control.
-pub fn setup(mode: SignalHandlerMode) {
-    SIGNAL_HANDLER_MODE.store(mode as usize, std::sync::atomic::Ordering::SeqCst);
-    Lazy::force(&REGISTER);
-}
-
-/// DO NOT USE - use [`setup()`] instead.
-///
-/// Indeed this is merely the old name of `setup()`, which is now a required part of configuring gix-tempfile.
-#[deprecated(
-    since = "2.0.0",
-    note = "call setup(…) instead, this function will be removed in the next major release"
-)]
-#[doc(hidden)]
-pub fn force_setup(mode: SignalHandlerMode) {
-    setup(mode)
+/// Like [`mark_at`], but allows to set the given filesystem `permissions`.
+pub fn mark_at_with_permissions(
+    path: impl AsRef<Path>,
+    directory: ContainingDirectory,
+    cleanup: AutoRemove,
+    permissions: std::fs::Permissions,
+) -> io::Result<Handle<Closed>> {
+    Handle::<Closed>::at_with_permissions(path, directory, cleanup, permissions)
 }

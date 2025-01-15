@@ -47,22 +47,18 @@
 //! ever get into a code-path which does panic though.
 //! </details>
 #![deny(missing_docs, rust_2018_idioms)]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 /// A dummy type to represent path specs and help finding all spots that take path specs once it is implemented.
-
-/// A preliminary version of a path-spec based on glances of the code.
-#[derive(Clone, Debug)]
-pub struct Spec(bstr::BString);
-
 mod convert;
 pub use convert::*;
 
 mod util;
 pub use util::is_absolute;
 
-mod spec;
-
 ///
 pub mod realpath;
 pub use realpath::function::{realpath, realpath_opts};
+
+/// Information about the environment in terms of locations of resources.
+pub mod env;

@@ -31,8 +31,8 @@ pub trait Transport: TransportWithoutIO {
     /// Returns the service capabilities according according to the actual [Protocol] it supports,
     /// and possibly a list of refs to be obtained.
     /// This means that asking for an unsupported protocol might result in a protocol downgrade to the given one
-    /// if [TransportWithoutIO::supported_protocol_versions()] includes it.
-    /// Exhaust the returned [BufReader][SetServiceResponse::refs] for a list of references in case of protocol V1
+    /// if [`TransportWithoutIO::supported_protocol_versions()`] includes it.
+    /// Exhaust the returned [`BufReader`][SetServiceResponse::refs] for a list of references in case of protocol V1
     /// before making another request.
     fn handshake<'a>(
         &mut self,
@@ -66,13 +66,16 @@ impl<T: Transport + ?Sized> Transport for &mut T {
 pub trait TransportV2Ext {
     /// Invoke a protocol V2 style `command` with given `capabilities` and optional command specific `arguments`.
     /// The `capabilities` were communicated during the handshake.
+    /// If `trace` is `true`, then all packetlines written and received will be traced using facilities provided by the `gix_trace` crate.
+    ///
     /// _Note:_ panics if [handshake][Transport::handshake()] wasn't performed beforehand.
     fn invoke<'a>(
         &mut self,
         command: &str,
         capabilities: impl Iterator<Item = (&'a str, Option<impl AsRef<str>>)> + 'a,
         arguments: Option<impl Iterator<Item = bstr::BString>>,
-    ) -> Result<Box<dyn ExtendedBufRead + Unpin + '_>, Error>;
+        trace: bool,
+    ) -> Result<Box<dyn ExtendedBufRead<'_> + Unpin + '_>, Error>;
 }
 
 impl<T: Transport> TransportV2Ext for T {
@@ -81,8 +84,9 @@ impl<T: Transport> TransportV2Ext for T {
         command: &str,
         capabilities: impl Iterator<Item = (&'a str, Option<impl AsRef<str>>)> + 'a,
         arguments: Option<impl Iterator<Item = BString>>,
-    ) -> Result<Box<dyn ExtendedBufRead + Unpin + '_>, Error> {
-        let mut writer = self.request(WriteMode::OneLfTerminatedLinePerWriteCall, MessageKind::Flush)?;
+        trace: bool,
+    ) -> Result<Box<dyn ExtendedBufRead<'_> + Unpin + '_>, Error> {
+        let mut writer = self.request(WriteMode::OneLfTerminatedLinePerWriteCall, MessageKind::Flush, trace)?;
         writer.write_all(format!("command={command}").as_bytes())?;
         for (name, value) in capabilities {
             match value {

@@ -1,12 +1,14 @@
+lints.workspace = true
+
 [package]
 name = "gix-fetchhead"
 version = "0.0.0"
-repository = "https://github.com/Byron/gitoxide"
-license = "MIT/Apache-2.0"
-description = "A WIP crate of the gitoxide project to read and write .git/FETCH_HEAD"
+repository = "https://github.com/GitoxideLabs/gitoxide"
+license = "MIT OR Apache-2.0"
+description = "A crate of the gitoxide project to read and write .git/FETCH_HEAD"
 authors = ["Sebastian Thiel <sebastian.thiel@icloud.com>"]
 edition = "2021"
-rust-version = "1.64"
+rust-version = "1.70"
 
 [lib]
 doctest = false

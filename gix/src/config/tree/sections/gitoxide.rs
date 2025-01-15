@@ -1,14 +1,21 @@
-use crate::config::tree::{keys, Gitoxide, Key, Section};
+use crate::{
+    config,
+    config::tree::{keys, Gitoxide, Key, Section},
+};
 
 impl Gitoxide {
     /// The `gitoxide.allow` section.
     pub const ALLOW: Allow = Allow;
     /// The `gitoxide.author` section.
     pub const AUTHOR: Author = Author;
+    /// The `gitoxide.core` section.
+    pub const CORE: Core = Core;
     /// The `gitoxide.commit` section.
     pub const COMMIT: Commit = Commit;
     /// The `gitoxide.committer` section.
     pub const COMMITTER: Committer = Committer;
+    /// The `gitoxide.credentials` section.
+    pub const CREDENTIALS: Credentials = Credentials;
     /// The `gitoxide.http` section.
     pub const HTTP: Http = Http;
     /// The `gitoxide.https` section.
@@ -19,11 +26,16 @@ impl Gitoxide {
     pub const SSH: Ssh = Ssh;
     /// The `gitoxide.user` section.
     pub const USER: User = User;
+    /// The `gitoxide.pathspec` section.
+    pub const PATHSPEC: Pathspec = Pathspec;
 
     /// The `gitoxide.userAgent` Key.
     pub const USER_AGENT: keys::Any = keys::Any::new("userAgent", &config::Tree::GITOXIDE).with_note(
         "The user agent presented on the git protocol layer, serving as fallback for when no `http.userAgent` is set",
     );
+    /// The `gitoxide.tracePacket` Key.
+    pub const TRACE_PACKET: keys::Boolean = keys::Boolean::new_boolean("tracePacket", &config::Tree::GITOXIDE)
+        .with_environment_override("GIT_TRACE_PACKET");
 }
 
 impl Section for Gitoxide {
@@ -32,20 +44,23 @@ impl Section for Gitoxide {
     }
 
     fn keys(&self) -> &[&dyn Key] {
-        &[&Self::USER_AGENT]
+        &[&Self::USER_AGENT, &Self::TRACE_PACKET]
     }
 
     fn sub_sections(&self) -> &[&dyn Section] {
         &[
             &Self::ALLOW,
             &Self::AUTHOR,
+            &Self::CORE,
             &Self::COMMIT,
             &Self::COMMITTER,
+            &Self::CREDENTIALS,
             &Self::HTTP,
             &Self::HTTPS,
             &Self::OBJECTS,
             &Self::SSH,
             &Self::USER,
+            &Self::PATHSPEC,
         ]
     }
 }
@@ -55,6 +70,93 @@ mod subsections {
         tree::{http, keys, Gitoxide, Key, Section},
         Tree,
     };
+
+    /// The `Core` sub-section.
+    #[derive(Copy, Clone, Default)]
+    pub struct Core;
+
+    /// The `gitoxide.allow.protocolFromUser` key.
+    pub type RefsNamespace = keys::Any<super::validate::RefsNamespace>;
+
+    impl RefsNamespace {
+        /// Derive the negotiation algorithm identified by `name`, case-sensitively.
+        pub fn try_into_refs_namespace(
+            &'static self,
+            name: std::borrow::Cow<'_, crate::bstr::BStr>,
+        ) -> Result<gix_ref::Namespace, crate::config::refs_namespace::Error> {
+            gix_ref::namespace::expand(name.as_ref())
+                .map_err(|err| crate::config::key::Error::from_value(self, name.into_owned()).with_source(err))
+        }
+    }
+
+    impl Core {
+        /// The `gitoxide.core.defaultPackCacheMemoryLimit` key.
+        pub const DEFAULT_PACK_CACHE_MEMORY_LIMIT: keys::UnsignedInteger =
+            keys::UnsignedInteger::new_unsigned_integer("defaultPackCacheMemoryLimit", &Gitoxide::CORE).with_note(
+                "If unset, we default to 96MB memory cap for the default 64 slot LRU cache for object deltas.",
+            );
+        /// The `gitoxide.core.useNsec` key.
+        pub const USE_NSEC: keys::Boolean = keys::Boolean::new_boolean("useNsec", &Gitoxide::CORE)
+            .with_note("A runtime version of the USE_NSEC build flag.");
+
+        /// The `gitoxide.core.useStdev` key.
+        pub const USE_STDEV: keys::Boolean = keys::Boolean::new_boolean("useStdev", &Gitoxide::CORE)
+            .with_note("A runtime version of the USE_STDEV build flag.");
+
+        /// The `gitoxide.core.protectWindows` key.
+        pub const PROTECT_WINDOWS: keys::Boolean = keys::Boolean::new_boolean("protectWindows", &Gitoxide::CORE)
+            .with_note("enable protections that are enabled by default on Windows");
+
+        /// The `gitoxide.core.shallowFile` key.
+        pub const SHALLOW_FILE: keys::Path = keys::Path::new_path("shallowFile", &Gitoxide::CORE)
+            .with_environment_override("GIT_SHALLOW_FILE")
+            .with_deviation(
+                "relative file paths will always be made relative to the git-common-dir, whereas `git` keeps them as is.",
+            );
+
+        /// The `gitoxide.core.filterProcessDelay` key (default `true`).
+        ///
+        /// It controls whether or not long running filter driver processes can use the 'delay' capability.
+        pub const FILTER_PROCESS_DELAY: keys::Boolean =
+            keys::Boolean::new_boolean("filterProcessDelay", &Gitoxide::CORE);
+
+        /// The `gitoxide.core.externalCommandStderr` key (default `true`).
+        ///
+        /// If `true`, the default, `stderr` of worktree filter programs, or any other git-context bearing command
+        /// invoked will be inherited.
+        /// If `false`, it will be suppressed completely.
+        pub const EXTERNAL_COMMAND_STDERR: keys::Boolean =
+            keys::Boolean::new_boolean("externalCommandStderr", &Gitoxide::CORE)
+                .with_environment_override("GIX_EXTERNAL_COMMAND_STDERR");
+
+        /// The `gitoxide.core.refsNamespace` key.
+        pub const REFS_NAMESPACE: RefsNamespace =
+            keys::Any::new_with_validate("refsNamespace", &Gitoxide::CORE, super::validate::RefsNamespace)
+                .with_environment_override("GIT_NAMESPACE");
+    }
+
+    impl Section for Core {
+        fn name(&self) -> &str {
+            "core"
+        }
+
+        fn keys(&self) -> &[&dyn Key] {
+            &[
+                &Self::DEFAULT_PACK_CACHE_MEMORY_LIMIT,
+                &Self::USE_NSEC,
+                &Self::USE_STDEV,
+                &Self::SHALLOW_FILE,
+                &Self::PROTECT_WINDOWS,
+                &Self::FILTER_PROCESS_DELAY,
+                &Self::EXTERNAL_COMMAND_STDERR,
+                &Self::REFS_NAMESPACE,
+            ]
+        }
+
+        fn parent(&self) -> Option<&dyn Section> {
+            Some(&Tree::GITOXIDE)
+        }
+    }
 
     /// The `Http` sub-section.
     #[derive(Copy, Clone, Default)]
@@ -93,6 +195,14 @@ mod subsections {
             http::SslVersion::new_ssl_version("sslVersionMax", &Gitoxide::HTTP).with_note(
                 "entirely new to set the upper bound for the allowed ssl version range. Overwrites the max bound of `http.sslVersion` if set. Min and Max must be set to become effective.",
             );
+        /// The `gitoxide.http.sslNoVerify` key.
+        ///
+        /// If set, disable SSL verification. Using this is discouraged as it can lead to
+        /// various security risks. An example where this may be needed is when an internal
+        /// git server uses a self-signed certificate and the user accepts the associated security risks.
+        pub const SSL_NO_VERIFY: keys::Boolean = keys::Boolean::new_boolean("sslNoVerify", &Gitoxide::HTTP)
+            .with_environment_override("GIT_SSL_NO_VERIFY")
+            .with_note("used to disable SSL verification. When this is enabled it takes priority over http.sslVerify");
         /// The `gitoxide.http.proxyAuthMethod` key.
         pub const PROXY_AUTH_METHOD: http::ProxyAuthMethod =
             http::ProxyAuthMethod::new_proxy_auth_method("proxyAuthMethod", &Gitoxide::HTTP)
@@ -113,6 +223,7 @@ mod subsections {
                 &Self::CONNECT_TIMEOUT,
                 &Self::SSL_VERSION_MIN,
                 &Self::SSL_VERSION_MAX,
+                &Self::SSL_NO_VERIFY,
                 &Self::PROXY_AUTH_METHOD,
             ]
         }
@@ -255,6 +366,56 @@ mod subsections {
         }
     }
 
+    /// The `pathspec` sub-section.
+    #[derive(Copy, Clone, Default)]
+    pub struct Pathspec;
+
+    impl Pathspec {
+        /// The `gitoxide.pathspec.glob` key.
+        pub const GLOB: keys::Boolean = keys::Boolean::new_boolean("glob", &Gitoxide::PATHSPEC)
+            .with_environment_override("GIT_GLOB_PATHSPECS")
+            .with_note("pathspec wildcards don't match the slash character, then needing '**' to get past them");
+        /// The `gitoxide.pathspec.noglob` key.
+        pub const NOGLOB: keys::Boolean = keys::Boolean::new_boolean("noglob", &Gitoxide::PATHSPEC)
+            .with_environment_override("GIT_NOGLOB_PATHSPECS")
+            .with_note("Enable literal matching for glob patterns, effectively disabling globbing");
+        /// The `gitoxide.pathspec.literal` key.
+        pub const LITERAL: keys::Boolean = keys::Boolean::new_boolean("literal", &Gitoxide::PATHSPEC)
+            .with_environment_override("GIT_LITERAL_PATHSPECS")
+            .with_note("Make the entire spec used verbatim, the only way to get ':()name' verbatim for instance");
+        /// The `gitoxide.pathspec.icase` key.
+        pub const ICASE: keys::Boolean = keys::Boolean::new_boolean("icase", &Gitoxide::PATHSPEC)
+            .with_environment_override("GIT_ICASE_PATHSPECS")
+            .with_note("Compare string in a case-insensitive manner");
+        /// The `gitoxide.pathspec.inheritIgnoreCase` key, defaulting to `true` if unspecified.
+        /// If set, pathspecs will automatically be match case-insensitively if the underlying filesystem is configured that way.
+        pub const INHERIT_IGNORE_CASE: keys::Boolean =
+            keys::Boolean::new_boolean("inheritIgnoreCase", &Gitoxide::PATHSPEC)
+                .with_note("Inherit `core.ignoreCase` for defaults in pathspecs");
+        /// The default value for `gitoxide.pathspec.inheritIgnoreCase`.
+        pub const INHERIT_IGNORE_CASE_DEFAULT: bool = true;
+    }
+
+    impl Section for Pathspec {
+        fn name(&self) -> &str {
+            "pathspec"
+        }
+
+        fn keys(&self) -> &[&dyn Key] {
+            &[
+                &Self::GLOB,
+                &Self::NOGLOB,
+                &Self::LITERAL,
+                &Self::ICASE,
+                &Self::INHERIT_IGNORE_CASE,
+            ]
+        }
+
+        fn parent(&self) -> Option<&dyn Section> {
+            Some(&Tree::GITOXIDE)
+        }
+    }
+
     /// The `objects` sub-section.
     #[derive(Copy, Clone, Default)]
     pub struct Objects;
@@ -264,10 +425,9 @@ mod subsections {
         pub const CACHE_LIMIT: keys::UnsignedInteger =
             keys::UnsignedInteger::new_unsigned_integer("cacheLimit", &Gitoxide::OBJECTS)
                 .with_note("If unset or 0, there is no object cache")
-                .with_environment_override("GITOXIDE_OBJECT_CACHE_MEMORY");
+                .with_environment_override("GIX_OBJECT_CACHE_MEMORY");
         /// The `gitoxide.objects.noReplace` key.
-        pub const NO_REPLACE: keys::Boolean = keys::Boolean::new_boolean("noReplace", &Gitoxide::OBJECTS)
-            .with_environment_override("GIT_NO_REPLACE_OBJECTS");
+        pub const NO_REPLACE: keys::Boolean = keys::Boolean::new_boolean("noReplace", &Gitoxide::OBJECTS);
         /// The `gitoxide.objects.replaceRefBase` key.
         pub const REPLACE_REF_BASE: keys::Any =
             keys::Any::new("replaceRefBase", &Gitoxide::OBJECTS).with_environment_override("GIT_REPLACE_REF_BASE");
@@ -279,7 +439,7 @@ mod subsections {
         }
 
         fn keys(&self) -> &[&dyn Key] {
-            &[&Self::CACHE_LIMIT, &Self::NO_REPLACE, &Self::REPLACE_REF_BASE]
+            &[&Self::CACHE_LIMIT, &Self::REPLACE_REF_BASE]
         }
 
         fn parent(&self) -> Option<&dyn Section> {
@@ -314,6 +474,37 @@ mod subsections {
         }
     }
 
+    /// The `credentials` sub-section.
+    #[derive(Copy, Clone, Default)]
+    pub struct Credentials;
+    impl Credentials {
+        /// The `gitoxide.credentials.terminalPrompt` key.
+        pub const TERMINAL_PROMPT: keys::Boolean = keys::Boolean::new_boolean("terminalPrompt", &Gitoxide::CREDENTIALS)
+            .with_note("This is a custom addition to provide an alternative to the respective environment variable.")
+            .with_environment_override("GIT_TERMINAL_PROMPT");
+
+        /// The `gitoxide.credentials.helperStderr` key to control what happens with the credential helpers `stderr`.
+        ///
+        /// If `true`, the default, `stderr` of credential helper programs will be inherited, just like with `git`.
+        /// If `false`, will be suppressed completely.
+        pub const HELPER_STDERR: keys::Boolean = keys::Boolean::new_boolean("helperStderr", &Gitoxide::CREDENTIALS)
+            .with_environment_override("GIX_CREDENTIALS_HELPER_STDERR");
+    }
+
+    impl Section for Credentials {
+        fn name(&self) -> &str {
+            "credentials"
+        }
+
+        fn keys(&self) -> &[&dyn Key] {
+            &[&Self::TERMINAL_PROMPT, &Self::HELPER_STDERR]
+        }
+
+        fn parent(&self) -> Option<&dyn Section> {
+            Some(&Tree::GITOXIDE)
+        }
+    }
+
     /// The `commit` sub-section.
     #[derive(Copy, Clone, Default)]
     pub struct Commit;
@@ -341,6 +532,7 @@ mod subsections {
         }
     }
 }
+pub use subsections::{Allow, Author, Commit, Committer, Core, Credentials, Http, Https, Objects, Pathspec, Ssh, User};
 
 pub mod validate {
     use std::error::Error;
@@ -356,8 +548,12 @@ pub mod validate {
             Ok(())
         }
     }
+
+    pub struct RefsNamespace;
+    impl Validate for RefsNamespace {
+        fn validate(&self, value: &BStr) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+            super::Core::REFS_NAMESPACE.try_into_refs_namespace(value.into())?;
+            Ok(())
+        }
+    }
 }
-
-pub use subsections::{Allow, Author, Commit, Committer, Http, Https, Objects, Ssh, User};
-
-use crate::config;

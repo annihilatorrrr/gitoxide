@@ -1,4 +1,4 @@
-use std::{convert::TryInto, str::FromStr, time::SystemTime};
+use std::{str::FromStr, time::SystemTime};
 
 use bstr::{BStr, BString, ByteSlice, ByteVec};
 
@@ -117,17 +117,17 @@ mod intercept {
         }
     }
 
-    impl<'a, T> Delegate for InterceptRev<'a, T>
+    impl<T> Delegate for InterceptRev<'_, T>
     where
         T: Delegate,
     {
         fn done(&mut self) {
             self.done = true;
-            self.inner.done()
+            self.inner.done();
         }
     }
 
-    impl<'a, T> delegate::Revision for InterceptRev<'a, T>
+    impl<T> delegate::Revision for InterceptRev<'_, T>
     where
         T: Delegate,
     {
@@ -158,7 +158,7 @@ mod intercept {
         }
     }
 
-    impl<'a, T> delegate::Navigate for InterceptRev<'a, T>
+    impl<T> delegate::Navigate for InterceptRev<'_, T>
     where
         T: Delegate,
     {
@@ -179,7 +179,7 @@ mod intercept {
         }
     }
 
-    impl<'a, T> delegate::Kind for InterceptRev<'a, T>
+    impl<T> delegate::Kind for InterceptRev<'_, T>
     where
         T: Delegate,
     {
@@ -203,7 +203,7 @@ fn long_describe_prefix(name: &BStr) -> Option<(&BStr, delegate::PrefixHint<'_>)
             return None;
         };
         let rest = substr.get(1..)?;
-        rest.iter().all(|b| b.is_ascii_hexdigit()).then(|| rest.as_bstr())
+        rest.iter().all(u8::is_ascii_hexdigit).then(|| rest.as_bstr())
     })?;
 
     let candidate = iter.clone().any(|token| !token.is_empty()).then_some(candidate);
@@ -213,7 +213,7 @@ fn long_describe_prefix(name: &BStr) -> Option<(&BStr, delegate::PrefixHint<'_>)
         .and_then(|generation| {
             iter.next().map(|token| {
                 let last_token_len = token.len();
-                let first_token_ptr = iter.last().map(|token| token.as_ptr()).unwrap_or(token.as_ptr());
+                let first_token_ptr = iter.last().map_or(token.as_ptr(), <[_]>::as_ptr);
                 // SAFETY: both pointers are definitely part of the same object
                 #[allow(unsafe_code)]
                 let prior_tokens_len: usize = unsafe { token.as_ptr().offset_from(first_token_ptr) }
@@ -234,7 +234,7 @@ fn short_describe_prefix(name: &BStr) -> Option<&BStr> {
     let mut iter = name.split(|b| *b == b'-');
     let candidate = iter
         .next()
-        .and_then(|prefix| prefix.iter().all(|b| b.is_ascii_hexdigit()).then(|| prefix.as_bstr()));
+        .and_then(|prefix| prefix.iter().all(u8::is_ascii_hexdigit).then(|| prefix.as_bstr()));
     (iter.count() == 1).then_some(candidate).flatten()
 }
 
@@ -252,14 +252,14 @@ fn parens(input: &[u8]) -> Result<Option<InsideParensRestConsumed<'_>>, Error> {
                 if ignore_next {
                     ignore_next = false;
                 } else {
-                    open_braces += 1
+                    open_braces += 1;
                 }
             }
             b'}' => {
                 if ignore_next {
                     ignore_next = false;
                 } else {
-                    open_braces -= 1
+                    open_braces -= 1;
                 }
             }
             b'\\' => {
@@ -275,7 +275,7 @@ fn parens(input: &[u8]) -> Result<Option<InsideParensRestConsumed<'_>>, Error> {
                 if ignore_next {
                     skip_list.pop();
                 };
-                ignore_next = false
+                ignore_next = false;
             }
         }
         if open_braces == 0 {
@@ -344,8 +344,19 @@ where
     {
         let mut cursor = input;
         let mut ofs = 0;
-        while let Some((pos, b)) = cursor.iter().enumerate().find(|(_, b)| {
-            if b"@~^:.".contains(b) {
+        const SEPARATORS: &[u8] = b"~^:.";
+        while let Some((pos, b)) = cursor.iter().enumerate().find(|(pos, b)| {
+            if **b == b'@' {
+                if cursor.len() == 1 {
+                    return true;
+                }
+                let next = cursor.get(pos + 1);
+                let next_next = cursor.get(pos + 2);
+                if *pos != 0 && (next, next_next) == (Some(&b'.'), Some(&b'.')) {
+                    return false;
+                }
+                next == Some(&b'{') || next.is_some_and(|b| SEPARATORS.contains(b))
+            } else if SEPARATORS.contains(b) {
                 true
             } else {
                 if let Some(num) = consecutive_hex_chars.as_mut() {
@@ -402,7 +413,7 @@ where
 
     input = {
         if let Some(b'@') = sep {
-            let past_sep = input[sep_pos.map(|pos| pos + 1).unwrap_or(input.len())..].as_bstr();
+            let past_sep = input[sep_pos.map_or(input.len(), |pos| pos + 1)..].as_bstr();
             let (nav, rest, _consumed) = parens(past_sep)?.ok_or_else(|| Error::AtNeedsCurlyBrackets {
                 input: input[sep_pos.unwrap_or(input.len())..].into(),
             })?;
@@ -411,16 +422,30 @@ where
                 if n < 0 {
                     if name.is_empty() {
                         delegate
-                            .nth_checked_out_branch(n.abs().try_into().expect("non-negative isize fits usize"))
+                            .nth_checked_out_branch(n.unsigned_abs())
                             .ok_or(Error::Delegate)?;
                     } else {
                         return Err(Error::RefnameNeedsPositiveReflogEntries { nav: nav.into() });
                     }
                 } else if has_ref_or_implied_name {
                     delegate
-                        .reflog(delegate::ReflogLookup::Entry(
-                            n.try_into().expect("non-negative isize fits usize"),
-                        ))
+                        .reflog(if n >= 100000000 {
+                            let time = nav
+                                .to_str()
+                                .map_err(|_| Error::Time {
+                                    input: nav.into(),
+                                    source: None,
+                                })
+                                .and_then(|date| {
+                                    gix_date::parse(date, None).map_err(|err| Error::Time {
+                                        input: nav.into(),
+                                        source: err.into(),
+                                    })
+                                })?;
+                            delegate::ReflogLookup::Date(time)
+                        } else {
+                            delegate::ReflogLookup::Entry(n.try_into().expect("non-negative isize fits usize"))
+                        })
                         .ok_or(Error::Delegate)?;
                 } else {
                     return Err(Error::ReflogLookupNeedsRefName { name: (*name).into() });
@@ -430,7 +455,7 @@ where
                     delegate.sibling_branch(kind).ok_or(Error::Delegate)
                 } else {
                     Err(Error::SiblingBranchNeedsBranchName { name: (*name).into() })
-                }?
+                }?;
             } else if has_ref_or_implied_name {
                 let time = nav
                     .to_str()
@@ -549,13 +574,13 @@ where
                         invalid => return Err(Error::InvalidObject { input: invalid.into() }),
                     };
                     delegate.peel_until(target).ok_or(Error::Delegate)?;
-                } else if past_sep.and_then(|i| i.first()) == Some(&b'!') {
+                } else if past_sep.and_then(<[_]>::first) == Some(&b'!') {
                     delegate
                         .kind(spec::Kind::ExcludeReachableFromParents)
                         .ok_or(Error::Delegate)?;
                     delegate.done();
                     return Ok(input[cursor + 1..].as_bstr());
-                } else if past_sep.and_then(|i| i.first()) == Some(&b'@') {
+                } else if past_sep.and_then(<[_]>::first) == Some(&b'@') {
                     delegate
                         .kind(spec::Kind::IncludeReachableFromParents)
                         .ok_or(Error::Delegate)?;

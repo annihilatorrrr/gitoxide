@@ -1,6 +1,6 @@
 /// Information gathered during the run of [`iter_from_objects()`][super::objects()].
 #[derive(Default, PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Outcome {
     /// The amount of objects provided to start the iteration.
     pub input_objects: usize,
@@ -32,10 +32,11 @@ impl Outcome {
 }
 
 /// The way input objects are handled
-#[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default, PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ObjectExpansion {
     /// Don't do anything with the input objects except for transforming them into pack entries
+    #[default]
     AsIs,
     /// If the input object is a Commit then turn it into a pack entry. Additionally obtain its tree, turn it into a pack entry
     /// along with all of its contents, that is nested trees, and any other objects reachable from it.
@@ -52,15 +53,9 @@ pub enum ObjectExpansion {
     TreeAdditionsComparedToAncestor,
 }
 
-impl Default for ObjectExpansion {
-    fn default() -> Self {
-        ObjectExpansion::AsIs
-    }
-}
-
 /// Configuration options for the pack generation functions provided in [this module][crate::data::output].
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Options {
     /// The amount of threads to use at most when resolving the pack. If `None`, all logical cores are used.
     /// If more than one thread is used, the order of returned [counts][crate::data::output::Count] is not deterministic anymore
@@ -82,24 +77,20 @@ impl Default for Options {
     }
 }
 
-/// The error returned by the pack generation iterator [bytes::FromEntriesIter][crate::data::output::bytes::FromEntriesIter].
+/// The error returned by the pack generation iterator [`bytes::FromEntriesIter`][crate::data::output::bytes::FromEntriesIter].
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
-pub enum Error<FindErr, IterErr>
-where
-    FindErr: std::error::Error + 'static,
-    IterErr: std::error::Error + 'static,
-{
+pub enum Error {
     #[error(transparent)]
     CommitDecode(gix_object::decode::Error),
     #[error(transparent)]
-    FindExisting(#[from] FindErr),
+    FindExisting(#[from] gix_object::find::existing::Error),
     #[error(transparent)]
-    InputIteration(IterErr),
+    InputIteration(Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error(transparent)]
     TreeTraverse(gix_traverse::tree::breadthfirst::Error),
     #[error(transparent)]
-    TreeChanges(gix_diff::tree::changes::Error),
+    TreeChanges(gix_diff::tree::Error),
     #[error("Operation interrupted")]
     Interrupted,
 }

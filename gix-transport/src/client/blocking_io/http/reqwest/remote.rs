@@ -1,16 +1,13 @@
 use std::{
     any::Any,
-    convert::TryFrom,
     io::{Read, Write},
     str::FromStr,
+    sync::{atomic, Arc},
 };
 
 use gix_features::io::pipe;
 
-use crate::client::{
-    http,
-    http::{reqwest::Remote, traits::PostBodyDataKind},
-};
+use crate::client::http::{self, options::FollowRedirects, redirect, reqwest::Remote, traits::PostBodyDataKind};
 
 /// The error returned by the 'remote' helper, a purely internal construct to perform http requests.
 #[derive(Debug, thiserror::Error)]
@@ -22,13 +19,15 @@ pub enum Error {
     ReadPostBody(#[from] std::io::Error),
     #[error("Request configuration failed")]
     ConfigureRequest(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error(transparent)]
+    Redirect(#[from] redirect::Error),
 }
 
 impl crate::IsSpuriousError for Error {
     fn is_spurious(&self) -> bool {
         match self {
             Error::Reqwest(err) => {
-                err.is_timeout() || err.is_connect() || err.status().map_or(false, |status| status.is_server_error())
+                err.is_timeout() || err.is_connect() || err.status().is_some_and(|status| status.is_server_error())
             }
             _ => false,
         }
@@ -40,23 +39,57 @@ impl Default for Remote {
         let (req_send, req_recv) = std::sync::mpsc::sync_channel(0);
         let (res_send, res_recv) = std::sync::mpsc::sync_channel(0);
         let handle = std::thread::spawn(move || -> Result<(), Error> {
+            let mut follow = None;
+            let mut redirected_base_url = None::<String>;
+            let allow_redirects = Arc::new(atomic::AtomicBool::new(false));
+
             // We may error while configuring, which is expected as part of the internal protocol. The error will be
             // received and the sender of the request might restart us.
             let client = reqwest::blocking::ClientBuilder::new()
                 .connect_timeout(std::time::Duration::from_secs(20))
                 .http1_title_case_headers()
+                .redirect(reqwest::redirect::Policy::custom({
+                    let allow_redirects = allow_redirects.clone();
+                    move |attempt| {
+                        if allow_redirects.load(atomic::Ordering::Relaxed) {
+                            let curr_url = attempt.url();
+                            let prev_urls = attempt.previous();
+
+                            match prev_urls.first() {
+                                Some(prev_url) if prev_url.host_str() != curr_url.host_str() => {
+                                    // git does not want to be redirected to a different host.
+                                    attempt.stop()
+                                }
+                                _ => {
+                                    // emulate default git behaviour which relies on curl default behaviour apparently.
+                                    const CURL_DEFAULT_REDIRS: usize = 50;
+                                    if prev_urls.len() >= CURL_DEFAULT_REDIRS {
+                                        attempt.error("too many redirects")
+                                    } else {
+                                        attempt.follow()
+                                    }
+                                }
+                            }
+                        } else {
+                            attempt.stop()
+                        }
+                    }
+                }))
                 .build()?;
+
             for Request {
                 url,
+                base_url,
                 headers,
                 upload_body_kind,
                 config,
             } in req_recv
             {
+                let effective_url = redirect::swap_tails(redirected_base_url.as_deref(), &base_url, url.clone());
                 let mut req_builder = if upload_body_kind.is_some() {
-                    client.post(url)
+                    client.post(&effective_url)
                 } else {
-                    client.get(url)
+                    client.get(&effective_url)
                 }
                 .headers(headers);
                 let (post_body_tx, mut post_body_rx) = pipe::unidirectional(0);
@@ -91,7 +124,21 @@ impl Default for Remote {
                         }
                     }
                 }
-                let mut res = match client.execute(req).and_then(|res| res.error_for_status()) {
+
+                let follow = follow.get_or_insert(config.follow_redirects);
+                allow_redirects.store(
+                    matches!(follow, FollowRedirects::Initial | FollowRedirects::All),
+                    atomic::Ordering::Relaxed,
+                );
+
+                if *follow == FollowRedirects::Initial {
+                    *follow = FollowRedirects::None;
+                }
+
+                let mut res = match client
+                    .execute(req)
+                    .and_then(reqwest::blocking::Response::error_for_status)
+                {
                     Ok(res) => res,
                     Err(err) => {
                         let (kind, err) = match err.status() {
@@ -112,6 +159,11 @@ impl Default for Remote {
                         continue;
                     }
                 };
+
+                let actual_url = res.url().as_str();
+                if actual_url != effective_url.as_str() {
+                    redirected_base_url = redirect::base_url(actual_url, &base_url, url)?.into();
+                }
 
                 let send_headers = {
                     let headers = res.headers();
@@ -152,10 +204,24 @@ impl Default for Remote {
 
 /// utilities
 impl Remote {
+    fn restore_thread_after_failure(&mut self) -> http::Error {
+        let err_that_brought_thread_down = self
+            .handle
+            .take()
+            .expect("thread handle present")
+            .join()
+            .expect("handler thread should never panic")
+            .expect_err("something should have gone wrong with curl (we join on error only)");
+        *self = Remote::default();
+        http::Error::InitHttpClient {
+            source: Box::new(err_that_brought_thread_down),
+        }
+    }
+
     fn make_request(
         &mut self,
         url: &str,
-        _base_url: &str,
+        base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
         upload_body_kind: Option<PostBodyDataKind>,
     ) -> Result<http::PostResponse<pipe::Reader, pipe::Reader, pipe::Writer>, http::Error> {
@@ -176,14 +242,19 @@ impl Remote {
                 None => continue,
             };
         }
-        self.request
+        if self
+            .request
             .send(Request {
                 url: url.to_owned(),
+                base_url: base_url.to_owned(),
                 headers: header_map,
                 upload_body_kind,
                 config: self.config.clone(),
             })
-            .expect("the remote cannot be down at this point");
+            .is_err()
+        {
+            return Err(self.restore_thread_after_failure());
+        }
 
         let Response {
             headers,
@@ -192,15 +263,7 @@ impl Remote {
         } = match self.response.recv() {
             Ok(res) => res,
             Err(_) => {
-                let err = self
-                    .handle
-                    .take()
-                    .expect("always present")
-                    .join()
-                    .expect("no panic")
-                    .expect_err("no receiver means thread is down with init error");
-                *self = Self::default();
-                return Err(http::Error::InitHttpClient { source: Box::new(err) });
+                return Err(self.restore_thread_after_failure());
             }
         };
 
@@ -246,6 +309,7 @@ impl http::Http for Remote {
 
 pub(crate) struct Request {
     pub url: String,
+    pub base_url: String,
     pub headers: reqwest::header::HeaderMap,
     pub upload_body_kind: Option<PostBodyDataKind>,
     pub config: http::Options,

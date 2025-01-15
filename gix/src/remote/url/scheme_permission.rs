@@ -1,9 +1,9 @@
-use std::{borrow::Cow, collections::BTreeMap, convert::TryFrom};
+use std::{borrow::Cow, collections::BTreeMap};
 
 use crate::{
     bstr::{BStr, BString, ByteSlice},
     config,
-    config::tree::{gitoxide, Key, Protocol},
+    config::tree::{gitoxide, Protocol},
 };
 
 /// All allowed values of the `protocol.allow` key.
@@ -59,11 +59,11 @@ impl SchemePermission {
         mut filter: fn(&gix_config::file::Metadata) -> bool,
     ) -> Result<Self, config::protocol::allow::Error> {
         let allow: Option<Allow> = config
-            .string_filter_by_key("protocol.allow", &mut filter)
+            .string_filter("protocol.allow", &mut filter)
             .map(|value| Protocol::ALLOW.try_into_allow(value, None))
             .transpose()?;
 
-        let mut saw_user = allow.map_or(false, |allow| allow == Allow::User);
+        let mut saw_user = allow == Some(Allow::User);
         let allow_per_scheme = match config.sections_by_name_and_filter("protocol", &mut filter) {
             Some(it) => {
                 let mut map = BTreeMap::default();
@@ -72,7 +72,7 @@ impl SchemePermission {
                         scheme
                             .to_str()
                             .ok()
-                            .and_then(|scheme| gix_url::Scheme::try_from(scheme).ok().map(|scheme| (section, scheme)))
+                            .map(|scheme| (section, gix_url::Scheme::from(scheme)))
                     })
                 }) {
                     if let Some(value) = section
@@ -91,7 +91,7 @@ impl SchemePermission {
 
         let user_allowed = saw_user.then(|| {
             config
-                .string_filter_by_key(gitoxide::Allow::PROTOCOL_FROM_USER.logical_name().as_str(), &mut filter)
+                .string_filter(gitoxide::Allow::PROTOCOL_FROM_USER, &mut filter)
                 .map_or(true, |val| val.as_ref() == "1")
         });
         Ok(SchemePermission {

@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 use bstr::BString;
 use gix_hash::ObjectId;
 
@@ -42,7 +40,7 @@ pub const SIGNATURE: Signature = *b"UNTR";
 // #[allow(unused)]
 /// Decode an untracked cache extension from `data`, assuming object hashes are of type `object_hash`.
 pub fn decode(data: &[u8], object_hash: gix_hash::Kind) -> Option<UntrackedCache> {
-    if !data.last().map(|b| *b == 0).unwrap_or(false) {
+    if !data.last().is_some_and(|b| *b == 0) {
         return None;
     }
     let (identifier_len, data) = var_int(data)?;
@@ -100,7 +98,7 @@ pub fn decode(data: &[u8], object_hash: gix_hash::Kind) -> Option<UntrackedCache
     hash_valid.for_each_set_bit(|index| {
         let (hash, rest) = split_at_pos(data, hash_len)?;
         data = rest;
-        directories[index].exclude_file_oid = ObjectId::from(hash).into();
+        directories[index].exclude_file_oid = ObjectId::from_bytes_or_panic(hash).into();
         Some(())
     });
 
@@ -149,7 +147,7 @@ fn decode_oid_stat(data: &[u8], hash_len: usize) -> Option<(OidStat, &[u8])> {
     Some((
         OidStat {
             stat,
-            id: ObjectId::from(hash),
+            id: ObjectId::from_bytes_or_panic(hash),
         },
         data,
     ))

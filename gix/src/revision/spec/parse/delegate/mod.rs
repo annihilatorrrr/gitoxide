@@ -1,10 +1,7 @@
 use std::collections::HashSet;
 
 use gix_hash::ObjectId;
-use gix_revision::spec::{
-    parse,
-    parse::delegate::{self},
-};
+use gix_revision::spec::{parse, parse::delegate};
 use smallvec::SmallVec;
 
 use super::{Delegate, Error, ObjectKindHint};
@@ -20,6 +17,7 @@ impl<'repo> Delegate<'repo> {
         Delegate {
             refs: Default::default(),
             objs: Default::default(),
+            paths: Default::default(),
             ambiguous_objects: Default::default(),
             idx: 0,
             kind: None,
@@ -103,6 +101,7 @@ impl<'repo> Delegate<'repo> {
 
         let range = zero_or_one_objects_or_ambiguity_err(self.objs, self.prefix, self.err, self.repo)?;
         Ok(crate::revision::Spec {
+            path: self.paths[0].take().or(self.paths[1].take()),
             first_ref: self.refs[0].take(),
             second_ref: self.refs[1].take(),
             inner: kind_to_spec(self.kind, range)?,
@@ -111,7 +110,7 @@ impl<'repo> Delegate<'repo> {
     }
 }
 
-impl<'repo> parse::Delegate for Delegate<'repo> {
+impl parse::Delegate for Delegate<'_> {
     fn done(&mut self) {
         self.follow_refs_to_objects_if_needed();
         self.disambiguate_objects_by_fallback_hint(
@@ -122,7 +121,7 @@ impl<'repo> parse::Delegate for Delegate<'repo> {
     }
 }
 
-impl<'repo> delegate::Kind for Delegate<'repo> {
+impl delegate::Kind for Delegate<'_> {
     fn kind(&mut self, kind: gix_revision::spec::Kind) -> Option<()> {
         use gix_revision::spec::Kind::*;
         self.kind = Some(kind);
@@ -138,7 +137,7 @@ impl<'repo> delegate::Kind for Delegate<'repo> {
     }
 }
 
-impl<'repo> Delegate<'repo> {
+impl Delegate<'_> {
     fn kind_implies_committish(&self) -> bool {
         self.kind.unwrap_or(gix_revision::spec::Kind::IncludeReachable) != gix_revision::spec::Kind::IncludeReachable
     }
@@ -200,16 +199,20 @@ impl<'repo> Delegate<'repo> {
         }
     }
     fn follow_refs_to_objects_if_needed(&mut self) -> Option<()> {
-        assert_eq!(self.refs.len(), self.objs.len());
         let repo = self.repo;
         for (r, obj) in self.refs.iter().zip(self.objs.iter_mut()) {
-            if let (_ref_opt @ Some(ref_), obj_opt @ None) = (r, obj) {
+            if let (Some(ref_), obj_opt @ None) = (r, obj) {
                 if let Some(id) = ref_.target.try_id().map(ToOwned::to_owned).or_else(|| {
-                    ref_.clone()
-                        .attach(repo)
-                        .peel_to_id_in_place()
-                        .ok()
-                        .map(|id| id.detach())
+                    match ref_.clone().attach(repo).peel_to_id_in_place() {
+                        Err(err) => {
+                            self.err.push(Error::PeelToId {
+                                name: ref_.name.clone(),
+                                source: err,
+                            });
+                            None
+                        }
+                        Ok(id) => Some(id.detach()),
+                    }
                 }) {
                     obj_opt.get_or_insert_with(HashSet::default).insert(id);
                 };

@@ -20,11 +20,23 @@ pub struct Store {
     /// The kind of hash to assume in a couple of situations. Note that currently we are able to read any valid hash from files
     /// which might want to change one day.
     object_hash: gix_hash::Kind,
+    /// The amount of bytes needed for `mmap` to be used to open packed refs.
+    packed_buffer_mmap_threshold: u64,
 
     /// The way to handle reflog edits
     pub write_reflog: WriteReflog,
     /// The namespace to use for edits and reads
     pub namespace: Option<Namespace>,
+    /// This is only needed on Windows, where some device names are reserved at any level of a path, so that
+    /// reading or writing `refs/heads/CON` for example would read from the console, or write to it.
+    pub prohibit_windows_device_names: bool,
+    /// If set, we will convert decomposed unicode like `a\u308` into precomposed unicode like `ä` when reading
+    /// ref names from disk.
+    /// Note that this is an internal operation that isn't observable on the outside, but it's needed for lookups
+    /// to packed-refs or symlinks to work correctly.
+    /// Iterated references will be returned verbatim, thus when sending them over the wire they have to be precomposed
+    /// as needed.
+    pub precompose_unicode: bool,
     /// A packed buffer which can be mapped in one version and shared as such.
     /// It's updated only in one spot, which is prior to reading it based on file stamps.
     /// Doing it like this has the benefit of being able to hand snapshots out to people without blocking others from updating it.
@@ -34,8 +46,19 @@ pub struct Store {
 mod access {
     use std::path::Path;
 
+    /// Mutation
+    impl file::Store {
+        /// Set the amount of `bytes` needed for the `.git/packed-refs` file to be memory mapped.
+        /// Returns the previous value, which is always 32KB.
+        pub fn set_packed_buffer_mmap_threshold(&mut self, mut bytes: u64) -> u64 {
+            std::mem::swap(&mut self.packed_buffer_mmap_threshold, &mut bytes);
+            bytes
+        }
+    }
+
     use crate::file;
 
+    /// Access
     impl file::Store {
         /// Return the `.git` directory at which all references are loaded.
         ///

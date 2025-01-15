@@ -1,4 +1,4 @@
-use std::{convert::TryInto, ops::Range};
+use std::ops::Range;
 
 use crate::{
     decode::{self, header},
@@ -64,9 +64,7 @@ pub fn chunk<'a>(
         .ok_or(decode::Error::Entry { index: idx })?;
 
         data = remaining;
-        if entry.mode.is_sparse() {
-            is_sparse = true;
-        }
+        is_sparse |= entry.mode.is_sparse();
         // TODO: entries are actually in an intrusive collection, with path as key. Could be set for us. This affects 'ignore_case' which we
         //       also don't yet handle but probably could, maybe even smartly with the collection.
         //       For now it's unclear to me how they access the index, they could iterate quickly, and have fast access by path.
@@ -98,7 +96,7 @@ fn load_one<'a>(
     let (size, data) = read_u32(data)?;
     let (hash, data) = split_at_pos(data, hash_len)?;
     let (flags, data) = read_u16(data)?;
-    let flags = entry::at_rest::Flags::from_bits(flags)?;
+    let flags = entry::at_rest::Flags::from_bits_retain(flags);
     let (flags, data) = if flags.contains(entry::at_rest::Flags::EXTENDED) {
         let (extended_flags, data) = read_u16(data)?;
         let extended_flags = entry::at_rest::FlagsExtended::from_bits(extended_flags)?;
@@ -134,6 +132,8 @@ fn load_one<'a>(
             (path, skip_padding(data, first_byte_of_entry))
         };
 
+        // TODO(perf): for some reason, this causes tremendous `memmove` time even though the backing
+        //             has enough capacity most of the time.
         path_backing.extend_from_slice(path);
         data
     };
@@ -142,11 +142,11 @@ fn load_one<'a>(
     Some((
         Entry {
             stat: entry::Stat {
-                ctime: entry::Time {
+                ctime: entry::stat::Time {
                     secs: ctime_secs,
                     nsecs: ctime_nsecs,
                 },
-                mtime: entry::Time {
+                mtime: entry::stat::Time {
                     secs: mtime_secs,
                     nsecs: mtime_nsecs,
                 },
@@ -156,7 +156,7 @@ fn load_one<'a>(
                 gid,
                 size,
             },
-            id: gix_hash::ObjectId::from(hash),
+            id: gix_hash::ObjectId::from_bytes_or_panic(hash),
             flags: flags & !entry::Flags::PATH_LEN,
             // This forces us to add the bits we need before being able to use them.
             mode: entry::Mode::from_bits_truncate(mode),

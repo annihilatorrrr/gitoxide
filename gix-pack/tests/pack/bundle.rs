@@ -1,5 +1,6 @@
 mod locate {
     use bstr::ByteSlice;
+    use gix_features::zlib;
     use gix_object::Kind;
     use gix_odb::pack;
 
@@ -8,13 +9,19 @@ mod locate {
     fn locate<'a>(hex_id: &str, out: &'a mut Vec<u8>) -> gix_object::Data<'a> {
         let bundle = pack::Bundle::at(fixture_path(SMALL_PACK_INDEX), gix_hash::Kind::Sha1).expect("pack and idx");
         bundle
-            .find(hex_to_id(hex_id), out, &mut pack::cache::Never)
+            .find(
+                &hex_to_id(hex_id),
+                out,
+                &mut zlib::Inflate::default(),
+                &mut pack::cache::Never,
+            )
             .expect("read success")
             .expect("id present")
             .0
     }
 
     mod locate_and_verify {
+        use gix_features::zlib;
         use gix_odb::pack;
 
         use crate::{fixture_path, pack::PACKS_AND_INDICES};
@@ -29,9 +36,14 @@ mod locate {
                 let mut buf = Vec::new();
                 for entry in bundle.index.iter() {
                     let (obj, _location) = bundle
-                        .find(entry.oid, &mut buf, &mut pack::cache::Never)?
+                        .find(
+                            &entry.oid,
+                            &mut buf,
+                            &mut zlib::Inflate::default(),
+                            &mut pack::cache::Never,
+                        )?
                         .expect("id present");
-                    obj.verify_checksum(entry.oid)?;
+                    obj.verify_checksum(&entry.oid)?;
                 }
             }
             Ok(())
@@ -80,7 +92,7 @@ mod write_to_directory {
 
     use gix_features::progress;
     use gix_odb::pack;
-    use tempfile::TempDir;
+    use gix_testtools::tempfile::TempDir;
 
     use crate::{
         fixture_path,
@@ -122,7 +134,7 @@ mod write_to_directory {
         let (index_path, data_path, keep_path) = (res.index_path.take(), res.data_path.take(), res.keep_path.take());
         assert_eq!(res, expected_outcome()?);
         let mut sorted_entries = fs::read_dir(&dir)?.filter_map(Result::ok).collect::<Vec<_>>();
-        sorted_entries.sort_by_key(|e| e.file_name());
+        sorted_entries.sort_by_key(fs::DirEntry::file_name);
         assert_eq!(
             sorted_entries.len(),
             3,
@@ -130,11 +142,11 @@ mod write_to_directory {
         );
 
         let pack_hash = res.index.data_hash.to_hex();
-        assert_eq!(file_name(&sorted_entries[0]), format!("pack-{}.idx", pack_hash));
+        assert_eq!(file_name(&sorted_entries[0]), format!("pack-{pack_hash}.idx"));
         assert_eq!(Some(sorted_entries[0].path()), index_path);
-        assert_eq!(file_name(&sorted_entries[1]), format!("pack-{}.keep", pack_hash));
+        assert_eq!(file_name(&sorted_entries[1]), format!("pack-{pack_hash}.keep"));
         assert_eq!(Some(sorted_entries[1].path()), keep_path);
-        assert_eq!(file_name(&sorted_entries[2]), format!("pack-{}.pack", pack_hash));
+        assert_eq!(file_name(&sorted_entries[2]), format!("pack-{pack_hash}.pack"));
         assert_eq!(Some(sorted_entries[2].path()), data_path);
 
         res.index_path = index_path;
@@ -153,12 +165,12 @@ mod write_to_directory {
         let pack_file = fs::File::open(fixture_path(pack_file))?;
         static SHOULD_INTERRUPT: AtomicBool = AtomicBool::new(false);
         pack::Bundle::write_to_directory_eagerly(
-            pack_file,
+            Box::new(pack_file),
             None,
             directory,
-            progress::Discard,
+            &mut progress::Discard,
             &SHOULD_INTERRUPT,
-            None,
+            None::<gix_object::find::Never>,
             pack::bundle::write::Options {
                 thread_limit: None,
                 iteration_mode: pack::data::input::Mode::Verify,

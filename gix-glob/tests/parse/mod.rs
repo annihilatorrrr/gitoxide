@@ -66,11 +66,21 @@ fn leading_exclamation_mark_negates_pattern() {
         gix_glob::parse(b"!hello"),
         pat("hello", Mode::NEGATIVE | Mode::NO_SUB_DIR, None)
     );
+    assert_eq!(
+        gix_glob::Pattern::from_bytes_without_negation(b"!hello"),
+        pat("!hello", Mode::NO_SUB_DIR, None),
+        "negation can be disabled entirely"
+    );
 }
 
 #[test]
 fn leading_exclamation_marks_can_be_escaped_with_backslash() {
     assert_eq!(gix_glob::parse(br"\!hello"), pat("!hello", Mode::NO_SUB_DIR, None));
+    assert_eq!(
+        gix_glob::Pattern::from_bytes_without_negation(br"\!hello"),
+        pat("\\!hello", Mode::NO_SUB_DIR, Some(0)),
+        "negation can be disabled entirely, leaving escapes in place"
+    );
 }
 
 #[test]
@@ -106,11 +116,11 @@ fn trailing_slashes_are_marked_and_removed() {
 }
 
 #[test]
-fn trailing_spaces_are_ignored() {
-    assert_eq!(gix_glob::parse(br"a   "), pat("a", Mode::NO_SUB_DIR, None));
+fn trailing_spaces_are_taken_literally() {
+    assert_eq!(gix_glob::parse(br"a   "), pat("a   ", Mode::NO_SUB_DIR, None));
     assert_eq!(
         gix_glob::parse(b"a\t\t  "),
-        pat("a\t\t", Mode::NO_SUB_DIR, None),
+        pat("a\t\t  ", Mode::NO_SUB_DIR, None),
         "trailing tabs are not ignored"
     );
 }
@@ -119,37 +129,32 @@ fn trailing_spaces_are_ignored() {
 fn trailing_spaces_can_be_escaped_to_be_literal() {
     assert_eq!(
         gix_glob::parse(br"a  \ "),
-        pat("a   ", Mode::NO_SUB_DIR, None),
-        "a single escape in front of the last desired space is enough"
+        pat("a  \\ ", Mode::NO_SUB_DIR, Some(3)),
+        "there is no escaping"
     );
     assert_eq!(
         gix_glob::parse(br"a  b  c "),
-        pat("a  b  c", Mode::NO_SUB_DIR, None),
-        "spaces in the middle are fine"
+        pat("a  b  c ", Mode::NO_SUB_DIR, None),
+        "spaces in the middle are fine and also at the end"
     );
     assert_eq!(
         gix_glob::parse(br"a\ \ \ "),
-        pat("a   ", Mode::NO_SUB_DIR, None),
-        "one can also escape every single one"
-    );
-    assert_eq!(
-        gix_glob::parse(br"a \  "),
-        pat("a  ", Mode::NO_SUB_DIR, None),
-        "or just the one in the middle, losing the last actual space"
+        pat(r"a\ \ \ ", Mode::NO_SUB_DIR, Some(1)),
+        "one can also escape every single space, but it's interpreted by the globbing engine"
     );
     assert_eq!(
         gix_glob::parse(br"a   \"),
-        pat("a   ", Mode::NO_SUB_DIR, None),
-        "escaping nothing also works as a whitespace protection"
+        pat(r"a   \", Mode::NO_SUB_DIR, Some(4)),
+        "escaping nothing also works"
     );
     assert_eq!(
         gix_glob::parse(br"a   \\\ "),
-        pat(r"a    ", Mode::NO_SUB_DIR, None),
+        pat(r"a   \\\ ", Mode::NO_SUB_DIR, Some(4)),
         "strange things like these work too"
     );
     assert_eq!(
         gix_glob::parse(br"a   \\ "),
-        pat(r"a   ", Mode::NO_SUB_DIR, None),
+        pat(r"a   \\ ", Mode::NO_SUB_DIR, Some(4)),
         "strange things like these work as well"
     );
 }

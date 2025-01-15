@@ -4,7 +4,7 @@ use std::{
     ops::Deref,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU16, AtomicUsize, Ordering},
+        atomic::{AtomicU16, Ordering},
         Arc,
     },
     time::SystemTime,
@@ -64,7 +64,7 @@ impl super::Store {
     pub(crate) fn load_all_indices(&self) -> Result<Snapshot, Error> {
         let mut snapshot = self.collect_snapshot();
         while let Some(new_snapshot) = self.load_one_index(RefreshMode::Never, snapshot.marker)? {
-            snapshot = new_snapshot
+            snapshot = new_snapshot;
         }
         Ok(snapshot)
     }
@@ -86,7 +86,7 @@ impl super::Store {
             Ok(Some(self.collect_snapshot()))
         } else {
             // always compare to the latest state
-            // Nothing changed in the mean time, try to load another index…
+            // Nothing changed in the meantime, try to load another index…
             if self.load_next_index(index) {
                 Ok(Some(self.collect_snapshot()))
             } else {
@@ -101,7 +101,7 @@ impl super::Store {
         }
     }
 
-    /// load a new index (if not yet loaded), and return true if one was indeed loaded (leading to a state_id() change) of the current index.
+    /// load a new index (if not yet loaded), and return true if one was indeed loaded (leading to a `state_id()` change) of the current index.
     /// Note that interacting with the slot-map is inherently racy and we have to deal with it, being conservative in what we even try to load
     /// as our index might already be out-of-date as we try to use it to learn what's next.
     fn load_next_index(&self, mut index: arc_swap::Guard<Arc<SlotMapIndex>>) -> bool {
@@ -119,7 +119,7 @@ impl super::Store {
                         let slot = &self.files[index.slot_indices[slot_map_index]];
                         let _lock = slot.write.lock();
                         if slot.generation.load(Ordering::SeqCst) > index.generation {
-                            // There is a disk consolidation in progress which just overwrote a slot that cold be disposed with some other
+                            // There is a disk consolidation in progress which just overwrote a slot that could be disposed with some other
                             // index, one we didn't intend to load.
                             // Continue with the next slot index in the hope there is something else we can do…
                             continue 'retry_with_next_slot_index;
@@ -128,14 +128,18 @@ impl super::Store {
                         let bundle_mut = Arc::make_mut(&mut bundle);
                         if let Some(files) = bundle_mut.as_mut() {
                             // these are always expected to be set, unless somebody raced us. We handle this later by retrying.
-                            let _loaded_count = IncOnDrop(&index.loaded_indices);
-                            match files.load_index(self.object_hash) {
+                            let res = {
+                                let res = files.load_index(self.object_hash);
+                                slot.files.store(bundle);
+                                index.loaded_indices.fetch_add(1, Ordering::SeqCst);
+                                res
+                            };
+                            match res {
                                 Ok(_) => {
-                                    slot.files.store(bundle);
                                     break 'retry_with_next_slot_index;
                                 }
-                                Err(_) => {
-                                    slot.files.store(bundle);
+                                Err(_err) => {
+                                    gix_features::trace::error!(err=?_err, "Failed to load index file - some objects may seem to not exist");
                                     continue 'retry_with_next_slot_index;
                                 }
                             }
@@ -145,10 +149,15 @@ impl super::Store {
                         // There can be contention as many threads start working at the same time and take all the
                         // slots to load indices for. Some threads might just be left-over and have to wait for something
                         // to change.
-                        let num_load_operations = index.num_indices_currently_being_loaded.deref();
                         // TODO: potentially hot loop - could this be a condition variable?
-                        while num_load_operations.load(Ordering::Relaxed) != 0 {
-                            std::thread::yield_now()
+                        // This is a timing-based fix for the case that the `num_indices_being_loaded` isn't yet incremented,
+                        // and we might break out here without actually waiting for the loading operation. Then we'd fail to
+                        // observe a change and the underlying handler would not have all the indices it needs at its disposal.
+                        // Yielding means we will definitely loose enough time to observe the ongoing operation,
+                        // or its effects.
+                        std::thread::yield_now();
+                        while index.num_indices_currently_being_loaded.load(Ordering::SeqCst) != 0 {
+                            std::thread::yield_now();
                         }
                         break 'retry_with_next_slot_index;
                     }
@@ -197,7 +206,7 @@ impl super::Store {
 
         // We might not be able to detect by pointer if the state changed, as this itself is racy. So we keep track of double-initialization
         // using a flag, which means that if `needs_init` was true we saw the index uninitialized once, but now that we are here it's
-        // initialized meaning that somebody was faster and we couldn't detect it by comparisons to the index.
+        // initialized meaning that somebody was faster, and we couldn't detect it by comparisons to the index.
         // If so, make sure we collect the snapshot instead of returning None in case nothing actually changed, which is likely with a
         // race like this.
         if !was_uninitialized && needs_init {
@@ -206,7 +215,7 @@ impl super::Store {
         self.num_disk_state_consolidation.fetch_add(1, Ordering::Relaxed);
 
         let db_paths: Vec<_> = std::iter::once(objects_directory.to_owned())
-            .chain(crate::alternate::resolve(objects_directory, &self.current_dir)?)
+            .chain(crate::alternate::resolve(objects_directory.clone(), &self.current_dir)?)
             .collect();
 
         // turn db paths into loose object databases. Reuse what's there, but only if it is in the right order.
@@ -257,7 +266,7 @@ impl super::Store {
                         Option::as_ref(&files_guard).expect("slot is set or we wouldn't know it points to this file");
                     if index_info.is_multi_index() && files.mtime() != mtime {
                         // we have a changed multi-pack index. We can't just change the existing slot as it may alter slot indices
-                        // that are currently available. Instead we have to move what's there into a new slot, along with the changes,
+                        // that are currently available. Instead, we have to move what's there into a new slot, along with the changes,
                         // and later free the slot or dispose of the index in the slot (like we do for removed/missing files).
                         index_paths_to_add.push_back((index_info, mtime, Some(slot_idx)));
                         // If the current slot is loaded, the soon-to-be copied multi-index path will be loaded as well.
@@ -283,8 +292,7 @@ impl super::Store {
             .slot_indices
             .iter()
             .max()
-            .map(|idx| (idx + 1) % self.files.len())
-            .unwrap_or(0);
+            .map_or(0, |idx| (idx + 1) % self.files.len());
         let mut num_indices_checked = 0;
         let mut needs_generation_change = false;
         let mut slot_indices_to_remove: Vec<_> = idx_by_index_path.into_values().collect();
@@ -295,6 +303,12 @@ impl super::Store {
                         current: self.files.len(),
                         needed: index_paths_to_add.len() + 1, /*the one currently popped off*/
                     });
+                }
+                // Don't allow duplicate indicates, we need a 1:1 mapping.
+                if new_slot_map_indices.contains(&next_possibly_free_index) {
+                    next_possibly_free_index = (next_possibly_free_index + 1) % self.files.len();
+                    num_indices_checked += 1;
+                    continue 'increment_slot_index;
                 }
                 let slot_index = next_possibly_free_index;
                 let slot = &self.files[slot_index];
@@ -398,18 +412,19 @@ impl super::Store {
                     // generation stays the same, as it's the same value still but scheduled for eventual removal.
                 }
             } else {
+                // set the generation before we actually change the value, otherwise readers of old generations could observe the new one.
+                // We rather want them to turn around here and update their index, which, by that time, might actually already be available.
+                // If not, they would fail unable to load a pack or index they need, but that's preferred over returning wrong objects.
+                // Safety: can't race as we hold the lock, have to set the generation beforehand to help avoid others to observe the value.
+                slot.generation.store(generation, Ordering::SeqCst);
                 *files_mut = None;
             };
             slot.files.store(files);
-            if !needs_stable_indices {
-                // Not racy due to lock, generation must be set after unsetting the slot value AND storing it.
-                slot.generation.store(generation, Ordering::SeqCst);
-            }
         }
 
         let new_index = self.index.load();
         Ok(if index.state_id() == new_index.state_id() {
-            // there was no change, and nothing was loaded in the meantime, reflect that in the return value to not get into loops
+            // there was no change, and nothing was loaded in the meantime, reflect that in the return value to not get into loops.
             None
         } else {
             if load_new_index {
@@ -471,8 +486,7 @@ impl super::Store {
                 })
                 .transpose()?;
             if let Some((multi_index, mtime, flen)) = multi_index_info {
-                let index_names_in_multi_index: Vec<_> =
-                    multi_index.index_names().iter().map(|p| p.as_path()).collect();
+                let index_names_in_multi_index: Vec<_> = multi_index.index_names().iter().map(AsRef::as_ref).collect();
                 let mut indices_not_in_multi_index: Vec<(Either, _, _)> = indices
                     .into_iter()
                     .filter_map(|(path, a, b)| {
@@ -489,17 +503,22 @@ impl super::Store {
                     indices
                         .into_iter()
                         .filter_map(|(p, a, b)| (!is_multipack_index(&p)).then_some((Either::IndexPath(p), a, b))),
-                )
+                );
             }
         }
         // Unlike libgit2, do not sort by modification date, but by size and put the biggest indices first. That way
         // the chance to hit an object should be higher. We leave it to the handle to sort by LRU.
-        // Git itself doesn't change the order which may safe time, but we want it to be stable which also helps some tests.
+        // Git itself doesn't change the order which may save time, but we want it to be stable which also helps some tests.
+        // NOTE: this will work well for well-packed repos or those using geometric repacking, but force us to open a lot
+        //       of files when dealing with new objects, as there is no notion of recency here as would be with unmaintained
+        //       repositories. Different algorithms should be provided, like newest packs first, and possibly a mix of both
+        //       with big packs first, then sorting by recency for smaller packs.
+        //       We also want to implement `fetch.unpackLimit` to alleviate this issue a little.
         indices_by_modification_time.sort_by(|l, r| l.2.cmp(&r.2).reverse());
         Ok(indices_by_modification_time)
     }
 
-    /// returns Ok<dest slot was empty> if the copy could happen because dest-slot was actually free or disposable , and Some(true) if it was empty
+    /// returns `Ok(dest_slot_was_empty)` if the copy could happen because dest-slot was actually free or disposable.
     #[allow(clippy::too_many_arguments)]
     fn try_set_index_slot(
         lock: &parking_lot::MutexGuard<'_, ()>,
@@ -616,34 +635,44 @@ impl super::Store {
     }
 
     pub(crate) fn collect_snapshot(&self) -> Snapshot {
+        // We don't observe changes-on-disk in our 'wait-for-load' loop.
+        // That loop is meant to help assure the marker (which includes the amount of loaded indices) matches
+        // the actual amount of indices we collect.
         let index = self.index.load();
-        let indices = if index.is_initialized() {
-            index
-                .slot_indices
-                .iter()
-                .map(|idx| (*idx, &self.files[*idx]))
-                .filter_map(|(id, file)| {
-                    let lookup = match (**file.files.load()).as_ref()? {
-                        types::IndexAndPacks::Index(bundle) => handle::SingleOrMultiIndex::Single {
-                            index: bundle.index.loaded()?.clone(),
-                            data: bundle.data.loaded().cloned(),
-                        },
-                        types::IndexAndPacks::MultiIndex(multi) => handle::SingleOrMultiIndex::Multi {
-                            index: multi.multi_index.loaded()?.clone(),
-                            data: multi.data.iter().map(|f| f.loaded().cloned()).collect(),
-                        },
-                    };
-                    handle::IndexLookup { file: lookup, id }.into()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        loop {
+            if index.num_indices_currently_being_loaded.deref().load(Ordering::SeqCst) != 0 {
+                std::thread::yield_now();
+                continue;
+            }
+            let marker = index.marker();
+            let indices = if index.is_initialized() {
+                index
+                    .slot_indices
+                    .iter()
+                    .map(|idx| (*idx, &self.files[*idx]))
+                    .filter_map(|(id, file)| {
+                        let lookup = match (**file.files.load()).as_ref()? {
+                            types::IndexAndPacks::Index(bundle) => handle::SingleOrMultiIndex::Single {
+                                index: bundle.index.loaded()?.clone(),
+                                data: bundle.data.loaded().cloned(),
+                            },
+                            types::IndexAndPacks::MultiIndex(multi) => handle::SingleOrMultiIndex::Multi {
+                                index: multi.multi_index.loaded()?.clone(),
+                                data: multi.data.iter().map(|f| f.loaded().cloned()).collect(),
+                            },
+                        };
+                        handle::IndexLookup { file: lookup, id }.into()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-        Snapshot {
-            indices,
-            loose_dbs: Arc::clone(&index.loose_dbs),
-            marker: index.marker(),
+            return Snapshot {
+                indices,
+                loose_dbs: Arc::clone(&index.loose_dbs),
+                marker,
+            };
         }
     }
 }
@@ -660,16 +689,9 @@ impl<'a> IncOnNewAndDecOnDrop<'a> {
         Self(v)
     }
 }
-impl<'a> Drop for IncOnNewAndDecOnDrop<'a> {
+impl Drop for IncOnNewAndDecOnDrop<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-struct IncOnDrop<'a>(&'a AtomicUsize);
-impl<'a> Drop for IncOnDrop<'a> {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -708,7 +730,7 @@ impl PartialEq<Self> for Either {
 
 impl PartialOrd<Self> for Either {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.path().partial_cmp(other.path())
+        Some(self.path().cmp(other.path()))
     }
 }
 

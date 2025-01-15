@@ -13,7 +13,7 @@ use crate::{client::Error, Protocol};
 /// This trait represents all transport related functions that don't require any input/output to be done which helps
 /// implementation to share more code across blocking and async programs.
 pub trait TransportWithoutIO {
-    /// If the handshake or subsequent reads failed with [std::io::ErrorKind::PermissionDenied], use this method to
+    /// If the handshake or subsequent reads failed with [`std::io::ErrorKind::PermissionDenied`], use this method to
     /// inform the transport layer about the identity to use for subsequent calls.
     /// If authentication continues to fail even with an identity set, consider communicating this to the provider
     /// of the identity in order to mark it as invalid. Otherwise the user might have difficulty updating obsolete
@@ -26,8 +26,14 @@ pub trait TransportWithoutIO {
     /// to support the task at hand.
     /// `write_mode` determines how calls to the `write(…)` method are interpreted, and `on_into_read` determines
     /// which message to write when the writer is turned into the response reader using [`into_read()`][RequestWriter::into_read()].
+    /// If `trace` is `true`, then all packetlines written and received will be traced using facilities provided by the `gix_trace` crate.
     #[cfg(any(feature = "blocking-client", feature = "async-client"))]
-    fn request(&mut self, write_mode: WriteMode, on_into_read: MessageKind) -> Result<RequestWriter<'_>, Error>;
+    fn request(
+        &mut self,
+        write_mode: WriteMode,
+        on_into_read: MessageKind,
+        trace: bool,
+    ) -> Result<RequestWriter<'_>, Error>;
 
     /// Returns the canonical URL pointing to the destination of this transport.
     fn to_url(&self) -> Cow<'_, BStr>;
@@ -66,8 +72,13 @@ impl<T: TransportWithoutIO + ?Sized> TransportWithoutIO for Box<T> {
     }
 
     #[cfg(any(feature = "blocking-client", feature = "async-client"))]
-    fn request(&mut self, write_mode: WriteMode, on_into_read: MessageKind) -> Result<RequestWriter<'_>, Error> {
-        self.deref_mut().request(write_mode, on_into_read)
+    fn request(
+        &mut self,
+        write_mode: WriteMode,
+        on_into_read: MessageKind,
+        trace: bool,
+    ) -> Result<RequestWriter<'_>, Error> {
+        self.deref_mut().request(write_mode, on_into_read, trace)
     }
 
     fn to_url(&self) -> Cow<'_, BStr> {
@@ -93,8 +104,13 @@ impl<T: TransportWithoutIO + ?Sized> TransportWithoutIO for &mut T {
     }
 
     #[cfg(any(feature = "blocking-client", feature = "async-client"))]
-    fn request(&mut self, write_mode: WriteMode, on_into_read: MessageKind) -> Result<RequestWriter<'_>, Error> {
-        self.deref_mut().request(write_mode, on_into_read)
+    fn request(
+        &mut self,
+        write_mode: WriteMode,
+        on_into_read: MessageKind,
+        trace: bool,
+    ) -> Result<RequestWriter<'_>, Error> {
+        self.deref_mut().request(write_mode, on_into_read, trace)
     }
 
     fn to_url(&self) -> Cow<'_, BStr> {

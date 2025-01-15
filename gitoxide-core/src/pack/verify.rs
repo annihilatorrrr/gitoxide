@@ -1,15 +1,14 @@
-use std::{io, path::Path, str::FromStr, sync::atomic::AtomicBool};
+use std::{ffi::OsStr, io, path::Path, str::FromStr, sync::atomic::AtomicBool};
 
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use bytesize::ByteSize;
-
 use gix::{
     object, odb,
     odb::{pack, pack::index},
-    Progress,
+    NestedProgress,
 };
 pub use index::verify::Mode;
-pub const PROGRESS_RANGE: std::ops::RangeInclusive<u8> = 1..=3;
+pub const PROGRESS_RANGE: std::ops::RangeInclusive<u8> = 1..=2;
 
 use crate::OutputFormat;
 
@@ -33,7 +32,7 @@ impl FromStr for Algorithm {
         Ok(match s_lc.as_str() {
             "less-memory" => Algorithm::LessMemory,
             "less-time" => Algorithm::LessTime,
-            _ => return Err(format!("Invalid verification algorithm: '{}'", s)),
+            _ => return Err(format!("Invalid verification algorithm: '{s}'")),
         })
     }
 }
@@ -88,7 +87,7 @@ impl<const SIZE: usize> pack::cache::DecodeEntry for EitherCache<SIZE> {
 
 pub fn pack_or_pack_index<W1, W2>(
     path: impl AsRef<Path>,
-    mut progress: impl Progress,
+    mut progress: impl NestedProgress + 'static,
     Context {
         mut out,
         mut err,
@@ -105,7 +104,7 @@ where
     W2: io::Write,
 {
     let path = path.as_ref();
-    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    let ext = path.extension().and_then(OsStr::to_str).unwrap_or("");
     const CACHE_SIZE: usize = 64;
     let cache = || -> EitherCache<CACHE_SIZE> {
         if matches!(algorithm, Algorithm::LessMemory) {
@@ -122,7 +121,7 @@ where
     let res = match ext {
         "pack" => {
             let pack = odb::pack::data::File::at(path, object_hash).with_context(|| "Could not open pack file")?;
-            pack.verify_checksum(progress.add_child("Sha1 of pack"), should_interrupt)
+            pack.verify_checksum(&mut progress.add_child("Sha1 of pack"), should_interrupt)
                 .map(|id| (id, None))?
         }
         "idx" => {
@@ -152,7 +151,7 @@ where
                         thread_limit
                     }
                 }),
-                progress,
+                &mut progress,
                 should_interrupt,
             )
             .map(|o| (o.actual_index_checksum, o.pack_traverse_statistics))
@@ -162,7 +161,7 @@ where
             match path.file_name() {
                 Some(file_name) if file_name == "multi-pack-index" => {
                     let multi_index = gix::odb::pack::multi_index::File::at(path)?;
-                    let res = multi_index.verify_integrity(progress, should_interrupt, gix::odb::pack::index::verify::integrity::Options{
+                    let res = multi_index.verify_integrity(&mut progress, should_interrupt, gix::odb::pack::index::verify::integrity::Options{
                         verify_mode: mode,
                         traversal: algorithm.into(),
                         thread_limit,
@@ -175,7 +174,7 @@ where
                                 drop(print_statistics(&mut out, &stats));
                             }
                         },
-                        #[cfg(feature = "serde1")]
+                        #[cfg(feature = "serde")]
                         Some(OutputFormat::Json) => serde_json::to_writer_pretty(out, &multi_index.index_names().iter().zip(res.pack_traverse_statistics).collect::<Vec<_>>())?,
                         _ => {}
                     };
@@ -190,10 +189,10 @@ where
         ext => return Err(anyhow!("Unknown extension {:?}, expecting 'idx' or 'pack'", ext)),
     };
     if let Some(stats) = res.1.as_ref() {
-        #[cfg_attr(not(feature = "serde1"), allow(clippy::single_match))]
+        #[cfg_attr(not(feature = "serde"), allow(clippy::single_match))]
         match output_statistics {
             Some(OutputFormat::Human) => drop(print_statistics(&mut out, stats)),
-            #[cfg(feature = "serde1")]
+            #[cfg(feature = "serde")]
             Some(OutputFormat::Json) => serde_json::to_writer_pretty(out, stats)?,
             _ => {}
         };
@@ -208,9 +207,9 @@ fn print_statistics(out: &mut impl io::Write, stats: &index::traverse::Statistic
     let mut total_object_count = 0;
     for (chain_length, object_count) in chain_length_to_object.into_iter() {
         total_object_count += object_count;
-        writeln!(out, "\t{:>2}: {}", chain_length, object_count)?;
+        writeln!(out, "\t{chain_length:>2}: {object_count}")?;
     }
-    writeln!(out, "\t->: {}", total_object_count)?;
+    writeln!(out, "\t->: {total_object_count}")?;
 
     let pack::data::decode::entry::Outcome {
         kind: _,

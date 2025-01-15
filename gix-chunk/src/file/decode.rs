@@ -1,7 +1,7 @@
-use std::{convert::TryInto, ops::Range};
+use std::ops::Range;
 
 mod error {
-    /// The value returned by [crate::FileRef::from_bytes()
+    /// The value returned by [`crate::file::Index::from_bytes()`]
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {
@@ -81,7 +81,7 @@ impl file::Index {
                     start: offset,
                     end: next_offset,
                 },
-            })
+            });
         }
 
         let sentinel = to_kind(&toc_entry[..4]);

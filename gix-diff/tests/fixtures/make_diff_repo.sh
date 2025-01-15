@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 
@@ -20,6 +20,7 @@ echo m > f
 git commit -qam 'f modified'
 
 rm f
+git add .
 git commit -qam 'f deleted'
 
 echo m > f
@@ -94,3 +95,13 @@ rm g/aa
 touch g/a
 git add g/a
 git commit -qam 'rm g/aa, add g/a'
+
+rm -Rf ./* && mkdir git-sec gix && touch a git-sec/2 git-sequencer h gix/5 && git add .
+git commit -am "clear slate"
+
+mkdir git-sec/subdir && touch git-sec/subdir/6 git-sec/7
+git add . && git commit -m "add files to git-sec"
+
+git mv git-sec gix-sec && git commit -m "rename git-sec to gix-sec"
+
+git mv gix-sec git-sec && git commit -m "rename gix-sec to git-sec"

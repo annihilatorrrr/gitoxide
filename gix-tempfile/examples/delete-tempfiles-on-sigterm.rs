@@ -1,12 +1,18 @@
-use std::{
-    io::{stdout, Write},
-    path::PathBuf,
-};
+#[cfg(not(feature = "signals"))]
+fn main() {
+    panic!("The `signals` feature needs to be set to compile this example");
+}
 
-use gix_tempfile::{AutoRemove, ContainingDirectory};
-
+#[cfg(feature = "signals")]
 fn main() -> std::io::Result<()> {
-    gix_tempfile::setup(Default::default());
+    use std::{
+        io::{stdout, Write},
+        path::PathBuf,
+    };
+
+    use gix_tempfile::{AutoRemove, ContainingDirectory};
+
+    gix_tempfile::signal::setup(Default::default());
     let filepath = PathBuf::new().join("tempfile.ext");
     let _tempfile = gix_tempfile::mark_at(&filepath, ContainingDirectory::Exists, AutoRemove::Tempfile)?;
     assert!(filepath.is_file(), "a tempfile was created");

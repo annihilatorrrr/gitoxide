@@ -1,8 +1,6 @@
 pub use crate::client::non_io_types::connect::{Error, Options};
 
 pub(crate) mod function {
-    use std::convert::TryInto;
-
     use crate::client::{non_io_types::connect::Error, Transport};
 
     /// A general purpose connector connecting to a repository identified by the given `url`.
@@ -23,19 +21,19 @@ pub(crate) mod function {
         Ok(match url.scheme {
             gix_url::Scheme::Ext(_) => return Err(Error::UnsupportedScheme(url.scheme)),
             gix_url::Scheme::File => {
-                if url.user().is_some() || url.host().is_some() || url.port.is_some() {
+                if url.user().is_some() || url.password().is_some() || url.host().is_some() || url.port.is_some() {
                     return Err(Error::UnsupportedUrlTokens {
                         url: url.to_bstring(),
                         scheme: url.scheme,
                     });
                 }
                 Box::new(
-                    crate::client::blocking_io::file::connect(url.path, options.version)
+                    crate::client::blocking_io::file::connect(url.path, options.version, options.trace)
                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
                 )
             }
             gix_url::Scheme::Ssh => Box::new({
-                crate::client::blocking_io::ssh::connect(url, options.version, options.ssh)
+                crate::client::blocking_io::ssh::connect(url, options.version, options.ssh, options.trace)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
             }),
             gix_url::Scheme::Git => {
@@ -52,6 +50,7 @@ pub(crate) mod function {
                         path,
                         options.version,
                         url.port,
+                        options.trace,
                     )
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
                 })
@@ -59,10 +58,9 @@ pub(crate) mod function {
             #[cfg(not(any(feature = "http-client-curl", feature = "http-client-reqwest")))]
             gix_url::Scheme::Https | gix_url::Scheme::Http => return Err(Error::CompiledWithoutHttp(url.scheme)),
             #[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest"))]
-            gix_url::Scheme::Https | gix_url::Scheme::Http => Box::new(crate::client::http::connect(
-                &url.to_bstring().to_string(),
-                options.version,
-            )),
+            gix_url::Scheme::Https | gix_url::Scheme::Http => {
+                Box::new(crate::client::http::connect(url, options.version, options.trace))
+            }
         })
     }
 }

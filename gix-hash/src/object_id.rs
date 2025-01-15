@@ -1,16 +1,14 @@
 use std::{
     borrow::Borrow,
-    convert::TryInto,
-    fmt,
     hash::{Hash, Hasher},
     ops::Deref,
 };
 
 use crate::{borrowed::oid, Kind, SIZE_OF_SHA1_DIGEST};
 
-/// An owned hash identifying objects, most commonly Sha1
+/// An owned hash identifying objects, most commonly `Sha1`
 #[derive(PartialEq, Eq, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ObjectId {
     /// A SHA 1 hash digest
     Sha1([u8; SIZE_OF_SHA1_DIGEST]),
@@ -22,10 +20,10 @@ pub enum ObjectId {
 // extremely unlikely to begin with so it doesn't matter.
 // This implementation matches the `Hash` implementation for `oid`
 // and allows the usage of custom Hashers that only copy a truncated ShaHash
-#[allow(clippy::derive_hash_xor_eq)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 impl Hash for ObjectId {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(self.as_slice())
+        state.write(self.as_slice());
     }
 }
 
@@ -41,8 +39,8 @@ pub mod decode {
     pub enum Error {
         #[error("A hash sized {0} hexadecimal characters is invalid")]
         InvalidHexEncodingLength(usize),
-        #[error("Invalid character {c} at position {index}")]
-        Invalid { c: char, index: usize },
+        #[error("Invalid character encountered")]
+        Invalid,
     }
 
     /// Hash decoding
@@ -51,16 +49,19 @@ pub mod decode {
         ///
         /// Such a buffer can be obtained using [`oid::write_hex_to(buffer)`][super::oid::write_hex_to()]
         pub fn from_hex(buffer: &[u8]) -> Result<ObjectId, Error> {
-            use hex::FromHex;
             match buffer.len() {
-                40 => Ok(ObjectId::Sha1(<[u8; 20]>::from_hex(buffer).map_err(
-                    |err| match err {
-                        hex::FromHexError::InvalidHexCharacter { c, index } => Error::Invalid { c, index },
-                        hex::FromHexError::OddLength | hex::FromHexError::InvalidStringLength => {
-                            unreachable!("BUG: This is already checked")
-                        }
-                    },
-                )?)),
+                40 => Ok({
+                    ObjectId::Sha1({
+                        let mut buf = [0; 20];
+                        faster_hex::hex_decode(buffer, &mut buf).map_err(|err| match err {
+                            faster_hex::Error::InvalidChar | faster_hex::Error::Overflow => Error::Invalid,
+                            faster_hex::Error::InvalidLength(_) => {
+                                unreachable!("BUG: This is already checked")
+                            }
+                        })?;
+                        buf
+                    })
+                }),
                 len => Err(Error::InvalidHexEncodingLength(len)),
             }
         }
@@ -77,21 +78,21 @@ pub mod decode {
 
 /// Access and conversion
 impl ObjectId {
-    /// Returns the kind of hash used in this `Id`
+    /// Returns the kind of hash used in this instance.
     #[inline]
-    pub fn kind(&self) -> crate::Kind {
+    pub fn kind(&self) -> Kind {
         match self {
-            ObjectId::Sha1(_) => crate::Kind::Sha1,
+            ObjectId::Sha1(_) => Kind::Sha1,
         }
     }
-    /// Return the raw byte slice representing this hash
+    /// Return the raw byte slice representing this hash.
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Sha1(b) => b.as_ref(),
         }
     }
-    /// Return the raw mutable byte slice representing this hash
+    /// Return the raw mutable byte slice representing this hash.
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
@@ -99,7 +100,7 @@ impl ObjectId {
         }
     }
 
-    /// The hash of an empty blob
+    /// The hash of an empty blob.
     #[inline]
     pub const fn empty_blob(hash: Kind) -> ObjectId {
         match hash {
@@ -109,7 +110,7 @@ impl ObjectId {
         }
     }
 
-    /// The hash of an empty tree
+    /// The hash of an empty tree.
     #[inline]
     pub const fn empty_tree(hash: Kind) -> ObjectId {
         match hash {
@@ -119,19 +120,46 @@ impl ObjectId {
         }
     }
 
-    /// Returns true if this hash consists of all null bytes
+    /// Returns an instances whose bytes are all zero.
     #[inline]
+    #[doc(alias = "zero", alias = "git2")]
+    pub const fn null(kind: Kind) -> ObjectId {
+        match kind {
+            Kind::Sha1 => Self::null_sha1(),
+        }
+    }
+
+    /// Returns `true` if this hash consists of all null bytes.
+    #[inline]
+    #[doc(alias = "is_zero", alias = "git2")]
     pub fn is_null(&self) -> bool {
         match self {
             ObjectId::Sha1(digest) => &digest[..] == oid::null_sha1().as_bytes(),
         }
     }
 
-    /// Returns an Digest representing a hash with whose memory is zeroed.
+    /// Returns `true` if this hash is equal to an empty blob.
     #[inline]
-    pub const fn null(kind: crate::Kind) -> ObjectId {
-        match kind {
-            crate::Kind::Sha1 => Self::null_sha1(),
+    pub fn is_empty_blob(&self) -> bool {
+        self == &Self::empty_blob(self.kind())
+    }
+
+    /// Returns `true` if this hash is equal to an empty tree.
+    #[inline]
+    pub fn is_empty_tree(&self) -> bool {
+        self == &Self::empty_tree(self.kind())
+    }
+}
+
+/// Lifecycle
+impl ObjectId {
+    /// Convert `bytes` into an owned object Id or panic if the slice length doesn't indicate a supported hash.
+    ///
+    /// Use `Self::try_from(bytes)` for a fallible version.
+    pub fn from_bytes_or_panic(bytes: &[u8]) -> Self {
+        match bytes.len() {
+            20 => Self::Sha1(bytes.try_into().expect("prior length validation")),
+            other => panic!("BUG: unsupported hash len: {other}"),
         }
     }
 }
@@ -179,20 +207,19 @@ impl From<[u8; SIZE_OF_SHA1_DIGEST]> for ObjectId {
     }
 }
 
-impl From<&[u8]> for ObjectId {
-    fn from(v: &[u8]) -> Self {
-        match v.len() {
-            20 => Self::Sha1(v.try_into().expect("prior length validation")),
-            other => panic!("BUG: unsupported hash len: {other}"),
+impl From<&oid> for ObjectId {
+    fn from(v: &oid) -> Self {
+        match v.kind() {
+            Kind::Sha1 => ObjectId::from_20_bytes(v.as_bytes()),
         }
     }
 }
 
-impl From<&crate::oid> for ObjectId {
-    fn from(v: &oid) -> Self {
-        match v.kind() {
-            crate::Kind::Sha1 => ObjectId::from_20_bytes(v.as_bytes()),
-        }
+impl TryFrom<&[u8]> for ObjectId {
+    type Error = crate::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Ok(oid::try_from_bytes(bytes)?.into())
     }
 }
 
@@ -204,25 +231,25 @@ impl Deref for ObjectId {
     }
 }
 
-impl AsRef<crate::oid> for ObjectId {
+impl AsRef<oid> for ObjectId {
     fn as_ref(&self) -> &oid {
         oid::from_bytes_unchecked(self.as_slice())
     }
 }
 
-impl Borrow<crate::oid> for ObjectId {
+impl Borrow<oid> for ObjectId {
     fn borrow(&self) -> &oid {
         self.as_ref()
     }
 }
 
-impl fmt::Display for ObjectId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for ObjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_hex())
     }
 }
 
-impl PartialEq<&crate::oid> for ObjectId {
+impl PartialEq<&oid> for ObjectId {
     fn eq(&self, other: &&oid) -> bool {
         self.as_ref() == *other
     }

@@ -29,7 +29,7 @@ where
     }
 }
 
-impl<'a, I> Iterator for Iter<'a, I>
+impl<I> Iterator for Iter<'_, I>
 where
     I: Iterator,
 {
@@ -67,7 +67,7 @@ where
     }
 }
 
-impl<'a, I, EFN, E> Iterator for IterWithErr<'a, I, EFN>
+impl<I, EFN, E> Iterator for IterWithErr<'_, I, EFN>
 where
     I: Iterator,
     EFN: FnOnce() -> E,
@@ -89,9 +89,9 @@ where
     }
 }
 
-/// A wrapper for implementors of [`std::io::Read`] or [`std::io::BufRead`] with interrupt support.
+/// A wrapper for implementers of [`std::io::Read`] or [`std::io::BufRead`] with interrupt support.
 ///
-/// It fails a [read][`std::io::Read::read`] while an interrupt was requested.
+/// It fails a [read][std::io::Read::read] while an interrupt was requested.
 pub struct Read<'a, R> {
     /// The actual implementor of [`std::io::Read`] to which interrupt support will be added.
     pub inner: R,
@@ -99,7 +99,7 @@ pub struct Read<'a, R> {
     pub should_interrupt: &'a AtomicBool,
 }
 
-impl<'a, R> io::Read for Read<'a, R>
+impl<R> io::Read for Read<'_, R>
 where
     R: io::Read,
 {
@@ -111,7 +111,7 @@ where
     }
 }
 
-impl<'a, R> io::BufRead for Read<'a, R>
+impl<R> io::BufRead for Read<'_, R>
 where
     R: io::BufRead,
 {
@@ -120,6 +120,42 @@ where
     }
 
     fn consume(&mut self, amt: usize) {
-        self.inner.consume(amt)
+        self.inner.consume(amt);
+    }
+}
+
+/// A wrapper for implementers of [`std::io::Write`] with interrupt checks on each write call.
+///
+/// It fails a [write][std::io::Write::write] while an interrupt was requested.
+pub struct Write<'a, W> {
+    /// The actual implementor of [`std::io::Write`] to which interrupt support will be added.
+    pub inner: W,
+    /// The flag to trigger interruption
+    pub should_interrupt: &'a AtomicBool,
+}
+
+impl<W> io::Write for Write<'_, W>
+where
+    W: std::io::Write,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.should_interrupt.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Interrupted"));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // Don't interrupt here, allow flushes to happen to prefer disk consistency.
+        self.inner.flush()
+    }
+}
+
+impl<W> io::Seek for Write<'_, W>
+where
+    W: std::io::Seek,
+{
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
     }
 }

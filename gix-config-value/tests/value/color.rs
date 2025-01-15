@@ -54,6 +54,7 @@ mod name {
         assert!(Name::from_str("#").is_err());
         assert!(Name::from_str("#fff").is_err());
         assert!(Name::from_str("#gggggg").is_err());
+        assert!(Name::from_str("#=»©=").is_err());
     }
 }
 
@@ -109,8 +110,6 @@ mod attribute {
 }
 
 mod from_git {
-    use std::convert::TryFrom;
-
     use bstr::BStr;
     use gix_config_value::Color;
 

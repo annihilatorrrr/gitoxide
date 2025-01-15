@@ -4,14 +4,32 @@ pub struct Options {
     pub format: OutputFormat,
     pub explain: bool,
     pub cat_file: bool,
+    pub tree_mode: TreeMode,
+    pub blob_format: BlobFormat,
+    pub show_reference: bool,
+}
+
+pub enum TreeMode {
+    Raw,
+    Pretty,
+}
+
+#[derive(Copy, Clone)]
+pub enum BlobFormat {
+    Git,
+    Worktree,
+    Diff,
+    DiffOrGit,
 }
 
 pub(crate) mod function {
     use std::ffi::OsString;
 
-    use anyhow::Context;
+    use gix::revision::Spec;
 
     use super::Options;
+    use crate::repository::cat::display_object;
+    use crate::repository::revision::resolve::BlobFormat;
     use crate::{repository::revision, OutputFormat};
 
     pub fn resolve(
@@ -22,9 +40,28 @@ pub(crate) mod function {
             format,
             explain,
             cat_file,
+            tree_mode,
+            blob_format,
+            show_reference,
         }: Options,
     ) -> anyhow::Result<()> {
         repo.object_cache_size_if_unset(1024 * 1024);
+        let mut cache = (!matches!(blob_format, BlobFormat::Git))
+            .then(|| {
+                repo.diff_resource_cache(
+                    match blob_format {
+                        BlobFormat::Git => {
+                            unreachable!("checked before")
+                        }
+                        BlobFormat::Worktree | BlobFormat::Diff => {
+                            gix::diff::blob::pipeline::Mode::ToWorktreeAndBinaryToText
+                        }
+                        BlobFormat::DiffOrGit => gix::diff::blob::pipeline::Mode::ToGitUnlessBinaryToTextIsPresent,
+                    },
+                    Default::default(),
+                )
+            })
+            .transpose()?;
 
         match format {
             OutputFormat::Human => {
@@ -35,12 +72,18 @@ pub(crate) mod function {
                     let spec = gix::path::os_str_into_bstr(&spec)?;
                     let spec = repo.rev_parse(spec)?;
                     if cat_file {
-                        return display_object(spec, out);
+                        return display_object(&repo, spec, tree_mode, cache.as_mut().map(|c| (blob_format, c)), out);
+                    }
+                    if let Some(r) = spec.first_reference().filter(|_| show_reference) {
+                        writeln!(out, "{}", r.name)?;
+                    }
+                    if let Some(r) = spec.second_reference().filter(|_| show_reference) {
+                        writeln!(out, "{}", r.name)?;
                     }
                     writeln!(out, "{spec}", spec = spec.detach())?;
                 }
             }
-            #[cfg(feature = "serde1")]
+            #[cfg(feature = "serde")]
             OutputFormat::Json => {
                 if explain {
                     anyhow::bail!("Explanations are only for human consumption")
@@ -53,25 +96,11 @@ pub(crate) mod function {
                             gix::path::os_str_into_bstr(&spec)
                                 .map_err(anyhow::Error::from)
                                 .and_then(|spec| repo.rev_parse(spec).map_err(Into::into))
-                                .map(|spec| spec.detach())
+                                .map(Spec::detach)
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 )?;
             }
-        }
-        Ok(())
-    }
-
-    fn display_object(spec: gix::revision::Spec<'_>, mut out: impl std::io::Write) -> anyhow::Result<()> {
-        let id = spec.single().context("rev-spec must resolve to a single object")?;
-        let object = id.object()?;
-        match object.kind {
-            gix::object::Kind::Tree => {
-                for entry in object.into_tree().iter() {
-                    writeln!(out, "{}", entry?)?;
-                }
-            }
-            _ => out.write_all(&object.data)?,
         }
         Ok(())
     }

@@ -4,7 +4,7 @@ pub mod changes {
         Visit,
     };
     use gix_hash::ObjectId;
-    use gix_object::{bstr::BStr, tree::EntryMode};
+    use gix_object::bstr::BStr;
 
     use crate::data::output::count::objects_impl::util::InsertImmutable;
 
@@ -15,7 +15,7 @@ pub mod changes {
 
     impl<'a, H> AllNew<'a, H>
     where
-        H: InsertImmutable<ObjectId>,
+        H: InsertImmutable,
     {
         pub fn new(all_seen: &'a H) -> Self {
             AllNew {
@@ -28,9 +28,9 @@ pub mod changes {
         }
     }
 
-    impl<'a, H> Visit for AllNew<'a, H>
+    impl<H> Visit for AllNew<'_, H>
     where
-        H: InsertImmutable<ObjectId>,
+        H: InsertImmutable,
     {
         fn pop_front_tracked_path_and_set_current(&mut self) {}
 
@@ -42,8 +42,13 @@ pub mod changes {
 
         fn visit(&mut self, change: Change) -> Action {
             match change {
-                Change::Addition { oid, entry_mode } | Change::Modification { oid, entry_mode, .. } => {
-                    if entry_mode == EntryMode::Commit {
+                Change::Addition {
+                    oid,
+                    entry_mode,
+                    relation: _,
+                }
+                | Change::Modification { oid, entry_mode, .. } => {
+                    if entry_mode.is_commit() {
                         return Action::Continue;
                     }
                     let inserted = self.all_seen.insert(oid);
@@ -60,10 +65,7 @@ pub mod changes {
 
 pub mod traverse {
     use gix_hash::ObjectId;
-    use gix_object::{
-        bstr::BStr,
-        tree::{EntryMode, EntryRef},
-    };
+    use gix_object::{bstr::BStr, tree::EntryRef};
     use gix_traverse::tree::{visit::Action, Visit};
 
     use crate::data::output::count::objects_impl::util::InsertImmutable;
@@ -75,7 +77,7 @@ pub mod traverse {
 
     impl<'a, H> AllUnseen<'a, H>
     where
-        H: InsertImmutable<ObjectId>,
+        H: InsertImmutable,
     {
         pub fn new(all_seen: &'a H) -> Self {
             AllUnseen {
@@ -88,10 +90,12 @@ pub mod traverse {
         }
     }
 
-    impl<'a, H> Visit for AllUnseen<'a, H>
+    impl<H> Visit for AllUnseen<'_, H>
     where
-        H: InsertImmutable<ObjectId>,
+        H: InsertImmutable,
     {
+        fn pop_back_tracked_path_and_set_current(&mut self) {}
+
         fn pop_front_tracked_path_and_set_current(&mut self) {}
 
         fn push_back_tracked_path_component(&mut self, _component: &BStr) {}
@@ -110,8 +114,7 @@ pub mod traverse {
         }
 
         fn visit_nontree(&mut self, entry: &EntryRef<'_>) -> Action {
-            if entry.mode == EntryMode::Commit {
-                // links don't have a representation
+            if entry.mode.is_commit() {
                 return Action::Continue;
             }
             let inserted = self.all_seen.insert(entry.oid.to_owned());

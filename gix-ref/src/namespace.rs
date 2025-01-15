@@ -1,7 +1,4 @@
-use std::{
-    convert::TryInto,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use gix_object::bstr::{BStr, BString, ByteSlice, ByteVec};
 
@@ -21,9 +18,8 @@ impl Namespace {
         gix_path::from_byte_slice(&self.0)
     }
     /// Append the given `prefix` to this namespace so it becomes usable for prefixed iteration.
-    pub fn into_namespaced_prefix(mut self, prefix: impl AsRef<Path>) -> PathBuf {
-        let path = prefix.as_ref();
-        let prefix = gix_path::into_bstr(path);
+    pub fn into_namespaced_prefix(mut self, prefix: &Path) -> PathBuf {
+        let prefix = gix_path::into_bstr(prefix);
         self.0.push_str(prefix.as_ref());
         gix_path::to_native_path_on_windows(self.0).into_owned()
     }
@@ -36,10 +32,10 @@ impl Namespace {
 /// Given a `namespace` 'foo we output 'refs/namespaces/foo', and given 'foo/bar' we output 'refs/namespaces/foo/refs/namespaces/bar'.
 ///
 /// For more information, consult the [git namespace documentation](https://git-scm.com/docs/gitnamespaces).
-pub fn expand<'a, Name, E>(namespace: Name) -> Result<Namespace, gix_validate::refname::Error>
+pub fn expand<'a, Name, E>(namespace: Name) -> Result<Namespace, gix_validate::reference::name::Error>
 where
     Name: TryInto<&'a PartialNameRef, Error = E>,
-    gix_validate::refname::Error: From<E>,
+    gix_validate::reference::name::Error: From<E>,
 {
     let namespace = &namespace.try_into()?.0;
     let mut out = BString::default();

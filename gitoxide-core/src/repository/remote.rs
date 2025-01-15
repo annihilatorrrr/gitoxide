@@ -1,11 +1,10 @@
 #[cfg(any(feature = "blocking-client", feature = "async-client"))]
 mod refs_impl {
     use anyhow::bail;
-
     use gix::{
         protocol::handshake,
         refspec::{match_group::validate::Fix, RefSpec},
-        remote::fetch::Source,
+        remote::fetch::refmap::Source,
     };
 
     use super::by_name_or_url;
@@ -73,18 +72,21 @@ mod refs_impl {
                 .context("Remote didn't have a URL to connect to")?
                 .to_bstring()
         ));
-        let map = remote
-            .connect(gix::remote::Direction::Fetch, progress)
+        let (map, handshake) = remote
+            .connect(gix::remote::Direction::Fetch)
             .await?
-            .ref_map(gix::remote::ref_map::Options {
-                prefix_from_spec_as_filter_on_remote: !matches!(kind, refs::Kind::Remote),
-                ..Default::default()
-            })
+            .ref_map(
+                &mut progress,
+                gix::remote::ref_map::Options {
+                    prefix_from_spec_as_filter_on_remote: !matches!(kind, refs::Kind::Remote),
+                    ..Default::default()
+                },
+            )
             .await?;
 
         if handshake_info {
             writeln!(out, "Handshake Information")?;
-            writeln!(out, "\t{:?}", map.handshake)?;
+            writeln!(out, "\t{handshake:?}")?;
         }
         match kind {
             refs::Kind::Tracking { .. } => print_refmap(
@@ -98,7 +100,7 @@ mod refs_impl {
             refs::Kind::Remote => {
                 match format {
                     OutputFormat::Human => drop(print(out, &map.remote_refs)),
-                    #[cfg(feature = "serde1")]
+                    #[cfg(feature = "serde")]
                     OutputFormat::Json => serde_json::to_writer_pretty(
                         out,
                         &map.remote_refs.into_iter().map(JsonRef::from).collect::<Vec<_>>(),
@@ -117,7 +119,7 @@ mod refs_impl {
         mut out: impl std::io::Write,
         mut err: impl std::io::Write,
     ) -> anyhow::Result<()> {
-        let mut last_spec_index = gix::remote::fetch::SpecIndex::ExplicitInRemote(usize::MAX);
+        let mut last_spec_index = gix::remote::fetch::refmap::SpecIndex::ExplicitInRemote(usize::MAX);
         map.mappings.sort_by_key(|m| m.spec_index);
         for mapping in &map.mappings {
             if mapping.spec_index != last_spec_index {
@@ -144,11 +146,11 @@ mod refs_impl {
 
             write!(out, "\t")?;
             let target_id = match &mapping.remote {
-                gix::remote::fetch::Source::ObjectId(id) => {
-                    write!(out, "{}", id)?;
+                gix::remote::fetch::refmap::Source::ObjectId(id) => {
+                    write!(out, "{id}")?;
                     id
                 }
-                gix::remote::fetch::Source::Ref(r) => print_ref(&mut out, r)?,
+                gix::remote::fetch::refmap::Source::Ref(r) => print_ref(&mut out, r)?,
             };
             match &mapping.local {
                 Some(local) => {
@@ -188,7 +190,7 @@ mod refs_impl {
             for fix in &map.fixes {
                 match fix {
                     Fix::MappingWithPartialDestinationRemoved { name, spec } => {
-                        if prev_spec.map_or(true, |prev_spec| prev_spec != spec) {
+                        if prev_spec.is_some_and(|prev_spec| prev_spec != spec) {
                             prev_spec = spec.into();
                             spec.to_ref().write_to(&mut err)?;
                             writeln!(err)?;
@@ -220,12 +222,12 @@ mod refs_impl {
             }
         }
         if refspecs.is_empty() {
-            bail!("Without refspecs there is nothing to show here. Add refspecs as arguments or configure them in gix-config.")
+            bail!("Without refspecs there is nothing to show here. Add refspecs as arguments or configure them in .git/config.")
         }
         Ok(())
     }
 
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub enum JsonRef {
         Peeled {
             path: String,
@@ -242,6 +244,8 @@ mod refs_impl {
         },
         Symbolic {
             path: String,
+            #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+            tag: Option<String>,
             target: String,
             object: String,
         },
@@ -263,10 +267,12 @@ mod refs_impl {
                 },
                 handshake::Ref::Symbolic {
                     full_ref_name: path,
+                    tag,
                     target,
                     object,
                 } => JsonRef::Symbolic {
                     path: path.to_string(),
+                    tag: tag.map(|t| t.to_string()),
                     target: target.to_string(),
                     object: object.to_string(),
                 },
@@ -288,20 +294,26 @@ mod refs_impl {
             handshake::Ref::Direct {
                 full_ref_name: path,
                 object,
-            } => write!(&mut out, "{} {}", object, path).map(|_| object.as_ref()),
+            } => write!(&mut out, "{object} {path}").map(|_| object.as_ref()),
             handshake::Ref::Peeled {
                 full_ref_name: path,
                 tag,
                 object,
-            } => write!(&mut out, "{} {} object:{}", tag, path, object).map(|_| tag.as_ref()),
+            } => write!(&mut out, "{tag} {path} object:{object}").map(|_| tag.as_ref()),
             handshake::Ref::Symbolic {
                 full_ref_name: path,
+                tag,
                 target,
                 object,
-            } => write!(&mut out, "{} {} symref-target:{}", object, path, target).map(|_| object.as_ref()),
+            } => match tag {
+                Some(tag) => {
+                    write!(&mut out, "{tag} {path} symref-target:{target} peeled:{object}").map(|_| tag.as_ref())
+                }
+                None => write!(&mut out, "{object} {path} symref-target:{target}").map(|_| object.as_ref()),
+            },
             handshake::Ref::Unborn { full_ref_name, target } => {
                 static NULL: gix::hash::ObjectId = gix::hash::ObjectId::null(gix::hash::Kind::Sha1);
-                write!(&mut out, "unborn {} symref-target:{}", full_ref_name, target).map(|_| NULL.as_ref())
+                write!(&mut out, "unborn {full_ref_name} symref-target:{target}").map(|_| NULL.as_ref())
             }
         }
     }
@@ -322,18 +334,5 @@ pub(crate) fn by_name_or_url<'repo>(
     repo: &'repo gix::Repository,
     name_or_url: Option<&str>,
 ) -> anyhow::Result<gix::Remote<'repo>> {
-    use anyhow::Context;
-    Ok(match name_or_url {
-        Some(name) => {
-            if name.contains('/') || name.contains('.') {
-                repo.remote_at(gix::url::parse(name.into())?)?
-            } else {
-                repo.find_remote(name)?
-            }
-        }
-        None => repo
-            .head()?
-            .into_remote(gix::remote::Direction::Fetch)
-            .context("Cannot find a remote for unborn branch")??,
-    })
+    repo.find_fetch_remote(name_or_url.map(Into::into)).map_err(Into::into)
 }

@@ -1,9 +1,7 @@
 pub use crate::client::non_io_types::connect::{Error, Options};
 
-#[cfg(any(feature = "async-std"))]
+#[cfg(feature = "async-std")]
 pub(crate) mod function {
-    use std::convert::TryInto;
-
     use crate::client::{git, non_io_types::connect::Error};
 
     /// A general purpose connector connecting to a repository identified by the given `url`.
@@ -36,6 +34,7 @@ pub(crate) mod function {
                         url.port,
                         path,
                         options.version,
+                        options.trace,
                     )
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,

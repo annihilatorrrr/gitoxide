@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 git init -q
@@ -15,6 +15,17 @@ mkdir -p some/very/deeply/nested/subdir
 
 git clone --bare --shared . bare.git
 
+git clone --bare --shared . non-bare-without-worktree
+(cd non-bare-without-worktree
+  git config core.bare false
+)
+
+git clone --bare --shared . non-bare-without-worktree-with-index
+(cd non-bare-without-worktree
+  git config core.bare false
+  cp ../.git/index .
+)
+
 git worktree add worktrees/a
 git worktree add worktrees/b-private-dir-deleted
 rm -R .git/worktrees/b-private-dir-deleted
@@ -24,7 +35,7 @@ rm -R worktrees/c-worktree-deleted
 (cd bare.git
   git worktree add ../worktrees/from-bare/c
   git worktree add ../worktrees/from-bare/d-private-dir-deleted
-  rm -R -v ./worktrees/d-private-dir-deleted
+  rm -R ./worktrees/d-private-dir-deleted
 )
 
 git clone --bare --shared . bare-no-config.git
@@ -47,3 +58,48 @@ git init worktree-no-config-after-init
   rm .git/config
 )
 
+git init --bare bare-with-index.git
+(cd bare-with-index.git
+  touch index
+)
+
+git init --bare bare-with-index-bare
+(cd bare-with-index-bare
+  touch index
+)
+
+git init --bare bare-with-index-no-config-bare
+(cd bare-with-index-no-config-bare
+  touch index
+  rm config
+)
+
+git init non-bare-without-index
+(cd non-bare-without-index
+  touch this
+  git add this
+  git commit -m "init"
+  rm .git/index
+)
+
+git --git-dir=repo-with-worktree-in-config-unborn-no-worktreedir --work-tree=does-not-exist-yet init
+worktree=repo-with-worktree-in-config-unborn-worktree
+git --git-dir=repo-with-worktree-in-config-unborn --work-tree=$worktree init && mkdir $worktree
+
+repo=repo-with-worktree-in-config-unborn-empty-worktreedir
+git --git-dir=$repo --work-tree="." init
+touch $repo/index
+git -C $repo config core.worktree ''
+
+repo=repo-with-worktree-in-config-unborn-worktreedir-missing-value
+git --git-dir=$repo init
+touch $repo/index
+echo "    worktree" >> $repo/config
+
+worktree=repo-with-worktree-in-config-worktree
+git --git-dir=repo-with-worktree-in-config --work-tree=$worktree init
+mkdir $worktree && touch $worktree/file
+(cd repo-with-worktree-in-config
+  git add file
+  git commit -m "make sure na index exists"
+)

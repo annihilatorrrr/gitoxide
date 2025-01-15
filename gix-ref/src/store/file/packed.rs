@@ -16,13 +16,17 @@ impl file::Store {
         Ok(packed::Transaction::new_from_pack_and_lock(
             self.assure_packed_refs_uptodate()?,
             lock,
+            self.precompose_unicode,
+            self.namespace.clone(),
         ))
     }
 
     /// Try to open a new packed buffer. It's not an error if it doesn't exist, but yields `Ok(None)`.
+    ///
+    /// Note that it will automatically be memory mapped if it exceeds the default threshold of 32KB.
+    /// Change the threshold with [file::Store::set_packed_buffer_mmap_threshold()].
     pub fn open_packed_buffer(&self) -> Result<Option<packed::Buffer>, packed::buffer::open::Error> {
-        let need_more_than_this_many_bytes_to_use_mmap = 32 * 1024;
-        match packed::Buffer::open(self.packed_refs_path(), need_more_than_this_many_bytes_to_use_mmap) {
+        match packed::Buffer::open(self.packed_refs_path(), self.packed_buffer_mmap_threshold) {
             Ok(buf) => Ok(Some(buf)),
             Err(packed::buffer::open::Error::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),
@@ -69,17 +73,24 @@ pub mod transaction {
 }
 
 /// An up-to-date snapshot of the packed refs buffer.
-pub type SharedBufferSnapshot = gix_features::fs::SharedSnapshot<packed::Buffer>;
+pub type SharedBufferSnapshot = gix_fs::SharedFileSnapshot<packed::Buffer>;
 
 pub(crate) mod modifiable {
     use gix_features::threading::OwnShared;
 
     use crate::{file, packed};
 
-    pub(crate) type MutableSharedBuffer = OwnShared<gix_features::fs::MutableSnapshot<packed::Buffer>>;
+    pub(crate) type MutableSharedBuffer = OwnShared<gix_fs::SharedFileSnapshotMut<packed::Buffer>>;
 
     impl file::Store {
-        pub(crate) fn force_refresh_packed_buffer(&self) -> Result<(), packed::buffer::open::Error> {
+        /// Forcefully reload the packed refs buffer.
+        ///
+        /// This method should be used if it's clear that the buffer on disk has changed, to
+        /// make the latest changes visible before other operations are done on this instance.
+        ///
+        /// As some filesystems don't have nanosecond granularity, changes are likely to be missed
+        /// if they happen within one second otherwise.
+        pub fn force_refresh_packed_buffer(&self) -> Result<(), packed::buffer::open::Error> {
             self.packed.force_refresh(|| {
                 let modified = self.packed_refs_path().metadata()?.modified()?;
                 self.open_packed_buffer().map(|packed| Some(modified).zip(packed))

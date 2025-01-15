@@ -12,10 +12,10 @@
 //! in order to decompress packs in parallel and without any waste.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 ///
@@ -55,12 +55,10 @@ mod mmap {
         // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
         #[allow(unsafe_code)]
         unsafe {
-            memmap2::Mmap::map(&file)
+            memmap2::MmapOptions::new().map_copy_read_only(&file)
         }
     }
 }
-
-use std::convert::TryInto;
 
 #[inline]
 fn read_u32(b: &[u8]) -> u32 {
@@ -70,4 +68,10 @@ fn read_u32(b: &[u8]) -> u32 {
 #[inline]
 fn read_u64(b: &[u8]) -> u64 {
     u64::from_be_bytes(b.try_into().unwrap())
+}
+
+fn exact_vec<T>(capacity: usize) -> Vec<T> {
+    let mut v = Vec::new();
+    v.reserve_exact(capacity);
+    v
 }

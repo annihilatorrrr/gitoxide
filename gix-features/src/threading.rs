@@ -17,7 +17,7 @@ mod _impl {
     pub type Mutable<T> = parking_lot::Mutex<T>;
     /// A guarded reference suitable for safekeeping in a struct.
     pub type RefGuard<'a, T> = parking_lot::RwLockReadGuard<'a, T>;
-    /// A mapped reference created from a RefGuard
+    /// A mapped reference created from a `RefGuard`
     pub type MappedRefGuard<'a, U> = parking_lot::MappedRwLockReadGuard<'a, U>;
 
     /// Get a shared reference through a [`MutableOnDemand`] for read-only access.
@@ -28,6 +28,11 @@ mod _impl {
     /// Get a mutable reference through a [`MutableOnDemand`] for read-write access.
     pub fn get_mut<T>(v: &MutableOnDemand<T>) -> parking_lot::RwLockWriteGuard<'_, T> {
         v.write()
+    }
+
+    /// Get a mutable reference to the underlying data, with semantics similar to [Arc::make_mut()].
+    pub fn make_mut<T: Clone>(this: &mut OwnShared<T>) -> &mut T {
+        OwnShared::make_mut(this)
     }
 
     /// Get a mutable reference through a [`Mutable`] for read-write access.
@@ -73,6 +78,11 @@ mod _impl {
     /// Get a shared reference through a [`MutableOnDemand`] for read-only access.
     pub fn get_mut<T>(v: &RefCell<T>) -> RefMut<'_, T> {
         v.borrow_mut()
+    }
+
+    /// Get a mutable reference to the underlying data, with semantics similar to [Rc::make_mut()].
+    pub fn make_mut<T: Clone>(this: &mut OwnShared<T>) -> &mut T {
+        OwnShared::make_mut(this)
     }
 
     /// Get a mutable reference through a [`Mutable`] for read-write access.

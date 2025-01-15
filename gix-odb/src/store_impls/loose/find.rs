@@ -14,13 +14,11 @@ pub enum Error {
         path: PathBuf,
     },
     #[error("file at '{path}' showed invalid size of inflated data, expected {expected}, got {actual}")]
-    SizeMismatch {
-        actual: usize,
-        expected: usize,
-        path: PathBuf,
-    },
+    SizeMismatch { actual: u64, expected: u64, path: PathBuf },
     #[error(transparent)]
     Decode(#[from] gix_object::decode::LooseHeaderDecodeError),
+    #[error("Cannot store {size} in memory as it's not representable")]
+    OutOfMemory { size: u64 },
     #[error("Could not {action} data at '{path}'")]
     Io {
         source: std::io::Error,
@@ -34,9 +32,9 @@ impl Store {
     const OPEN_ACTION: &'static str = "open";
 
     /// Returns true if the given id is contained in our repository.
-    pub fn contains(&self, id: impl AsRef<gix_hash::oid>) -> bool {
-        debug_assert_eq!(self.object_hash, id.as_ref().kind());
-        hash_path(id.as_ref(), self.path.clone()).is_file()
+    pub fn contains(&self, id: &gix_hash::oid) -> bool {
+        debug_assert_eq!(self.object_hash, id.kind());
+        hash_path(id, self.path.clone()).is_file()
     }
 
     /// Given a `prefix`, find an object that matches it uniquely within this loose object
@@ -56,8 +54,9 @@ impl Store {
     ) -> Result<Option<crate::store::prefix::lookup::Outcome>, crate::loose::iter::Error> {
         let single_directory_iter = crate::loose::Iter {
             inner: gix_features::fs::walkdir_new(
-                self.path.join(prefix.as_oid().to_hex_with_len(2).to_string()),
+                &self.path.join(prefix.as_oid().to_hex_with_len(2).to_string()),
                 gix_features::fs::walkdir::Parallelism::Serial,
+                false,
             )
             .min_depth(1)
             .max_depth(1)
@@ -94,7 +93,7 @@ impl Store {
         match &mut candidates {
             Some(candidates) => match candidates.len() {
                 0 => Ok(None),
-                1 => Ok(candidates.iter().next().cloned().map(Ok)),
+                1 => Ok(candidates.iter().next().copied().map(Ok)),
                 _ => Ok(Some(Err(()))),
             },
             None => Ok(candidate.map(Ok)),
@@ -108,11 +107,11 @@ impl Store {
     /// there was no such object.
     pub fn try_find<'a>(
         &self,
-        id: impl AsRef<gix_hash::oid>,
+        id: &gix_hash::oid,
         out: &'a mut Vec<u8>,
     ) -> Result<Option<gix_object::Data<'a>>, Error> {
-        debug_assert_eq!(self.object_hash, id.as_ref().kind());
-        match self.find_inner(id.as_ref(), out) {
+        debug_assert_eq!(self.object_hash, id.kind());
+        match self.find_inner(id, out) {
             Ok(obj) => Ok(Some(obj)),
             Err(err) => match err {
                 Error::Io {
@@ -137,10 +136,10 @@ impl Store {
 
     /// Return only the decompressed size of the object and its kind without fully reading it into memory as tuple of `(size, kind)`.
     /// Returns `None` if `id` does not exist in the database.
-    pub fn try_header(&self, id: impl AsRef<gix_hash::oid>) -> Result<Option<(usize, gix_object::Kind)>, Error> {
+    pub fn try_header(&self, id: &gix_hash::oid) -> Result<Option<(u64, gix_object::Kind)>, Error> {
         const BUF_SIZE: usize = 256;
         let mut buf = [0_u8; BUF_SIZE];
-        let path = hash_path(id.as_ref(), self.path.clone());
+        let path = hash_path(id, self.path.clone());
 
         let mut inflate = zlib::Inflate::default();
         let mut istream = match fs::File::open(&path) {
@@ -224,16 +223,17 @@ impl Store {
             let decompressed_body_bytes_sans_header =
                 decompressed_start + header_size..decompressed_start + consumed_out;
 
-            if consumed_out != size + header_size {
+            if consumed_out as u64 != size + header_size as u64 {
                 return Err(Error::SizeMismatch {
-                    expected: size + header_size,
-                    actual: consumed_out,
+                    expected: size + header_size as u64,
+                    actual: consumed_out as u64,
                     path,
                 });
             }
             buf.copy_within(decompressed_body_bytes_sans_header, 0);
         } else {
-            buf.resize(bytes_read + size + header_size, 0);
+            let new_len = bytes_read as u64 + size + header_size as u64;
+            buf.resize(new_len.try_into().map_err(|_| Error::OutOfMemory { size: new_len })?, 0);
             {
                 let (input, output) = buf.split_at_mut(bytes_read);
                 let num_decompressed_bytes = zlib::stream::inflate::read(
@@ -246,17 +246,21 @@ impl Store {
                     action: "deflate",
                     path: path.to_owned(),
                 })?;
-                if num_decompressed_bytes + consumed_out != size + header_size {
+                if num_decompressed_bytes as u64 + consumed_out as u64 != size + header_size as u64 {
                     return Err(Error::SizeMismatch {
-                        expected: size + header_size,
-                        actual: num_decompressed_bytes + consumed_out,
+                        expected: size + header_size as u64,
+                        actual: num_decompressed_bytes as u64 + consumed_out as u64,
                         path,
                     });
                 }
             };
             buf.copy_within(decompressed_start + header_size.., 0);
         }
-        buf.resize(size, 0);
+        buf.resize(
+            size.try_into()
+                .expect("BUG: here the size is already confirmed to fit into memory"),
+            0,
+        );
         Ok(gix_object::Data { kind, data: buf })
     }
 }

@@ -2,6 +2,15 @@
 use crate::MAX_LINE_LEN;
 use crate::{PacketLineRef, StreamingPeekableIter, U16_HEX_BYTES};
 
+/// Allow the read-progress handler to determine how to continue.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ProgressAction {
+    /// Continue reading the next progress if available.
+    Continue,
+    /// Abort all IO even if more would be available, claiming the operation was interrupted.
+    Interrupt,
+}
+
 #[cfg(any(feature = "blocking-io", feature = "async-io"))]
 type ExhaustiveOutcome<'a> = (
     bool,                                                                     // is_done
@@ -34,7 +43,8 @@ pub use error::Error;
 
 impl<T> StreamingPeekableIter<T> {
     /// Return a new instance from `read` which will stop decoding packet lines when receiving one of the given `delimiters`.
-    pub fn new(read: T, delimiters: &'static [PacketLineRef<'static>]) -> Self {
+    /// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
+    pub fn new(read: T, delimiters: &'static [PacketLineRef<'static>], trace: bool) -> Self {
         StreamingPeekableIter {
             read,
             #[cfg(any(feature = "blocking-io", feature = "async-io"))]
@@ -44,6 +54,7 @@ impl<T> StreamingPeekableIter<T> {
             fail_on_err_lines: false,
             is_done: false,
             stopped_at: None,
+            trace,
         }
     }
 
@@ -86,7 +97,7 @@ impl<T> StreamingPeekableIter<T> {
 
     /// If `value` is `true` the provider will check for special `ERR` packet lines and stop iteration when one is encountered.
     ///
-    /// Use [`stopped_at()]`[StreamingPeekableIter::stopped_at()] to inspect the cause of the end of the iteration.
+    /// Use [`stopped_at()]`[`StreamingPeekableIter::stopped_at()`] to inspect the cause of the end of the iteration.
     /// ne
     pub fn fail_on_err_lines(&mut self, value: bool) {
         self.fail_on_err_lines = value;

@@ -13,7 +13,7 @@ const N32_HIGH_BIT: u32 = 1 << 31;
 
 /// Represents an entry within a pack index file, effectively mapping object [`IDs`][gix_hash::ObjectId] to pack data file locations.
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry {
     /// The ID of the object
     pub oid: gix_hash::ObjectId,
@@ -31,13 +31,13 @@ impl index::File {
     fn iter_v1(&self) -> impl Iterator<Item = Entry> + '_ {
         match self.version {
             index::Version::V1 => self.data[V1_HEADER_SIZE..]
-                .chunks(N32_SIZE + self.hash_len)
+                .chunks_exact(N32_SIZE + self.hash_len)
                 .take(self.num_objects as usize)
                 .map(|c| {
                     let (ofs, oid) = c.split_at(N32_SIZE);
                     Entry {
-                        oid: gix_hash::ObjectId::from(oid),
-                        pack_offset: crate::read_u32(ofs) as u64,
+                        oid: gix_hash::ObjectId::from_bytes_or_panic(oid),
+                        pack_offset: u64::from(crate::read_u32(ofs)),
                         crc32: None,
                     }
                 }),
@@ -47,15 +47,20 @@ impl index::File {
 
     fn iter_v2(&self) -> impl Iterator<Item = Entry> + '_ {
         let pack64_offset = self.offset_pack_offset64_v2();
+        let oids = self.data[V2_HEADER_SIZE..]
+            .chunks_exact(self.hash_len)
+            .take(self.num_objects as usize);
+        let crcs = self.data[self.offset_crc32_v2()..]
+            .chunks_exact(N32_SIZE)
+            .take(self.num_objects as usize);
+        let offsets = self.data[self.offset_pack_offset_v2()..]
+            .chunks_exact(N32_SIZE)
+            .take(self.num_objects as usize);
+        assert_eq!(oids.len(), crcs.len());
+        assert_eq!(crcs.len(), offsets.len());
         match self.version {
-            index::Version::V2 => izip!(
-                self.data[V2_HEADER_SIZE..].chunks(self.hash_len),
-                self.data[self.offset_crc32_v2()..].chunks(N32_SIZE),
-                self.data[self.offset_pack_offset_v2()..].chunks(N32_SIZE)
-            )
-            .take(self.num_objects as usize)
-            .map(move |(oid, crc32, ofs32)| Entry {
-                oid: gix_hash::ObjectId::from(oid),
+            index::Version::V2 => izip!(oids, crcs, offsets).map(move |(oid, crc32, ofs32)| Entry {
+                oid: gix_hash::ObjectId::from_bytes_or_panic(oid),
                 pack_offset: self.pack_offset_from_offset_v2(ofs32, pack64_offset),
                 crc32: Some(crate::read_u32(crc32)),
             }),
@@ -64,7 +69,7 @@ impl index::File {
     }
 
     /// Returns the object hash at the given index in our list of (sorted) sha1 hashes.
-    /// The index ranges from 0 to self.num_objects()
+    /// The index ranges from 0 to `self.num_objects()`
     ///
     /// # Panics
     ///
@@ -92,7 +97,7 @@ impl index::File {
             }
             index::Version::V1 => {
                 let start = V1_HEADER_SIZE + index * (N32_SIZE + self.hash_len);
-                crate::read_u32(&self.data[start..][..N32_SIZE]) as u64
+                u64::from(crate::read_u32(&self.data[start..][..N32_SIZE]))
             }
         }
     }
@@ -119,7 +124,7 @@ impl index::File {
     // NOTE: pretty much the same things as in `multi_index::File::lookup`, change things there
     //       as well.
     pub fn lookup(&self, id: impl AsRef<gix_hash::oid>) -> Option<EntryIndex> {
-        lookup(id, &self.fan, |idx| self.oid_at_index(idx))
+        lookup(id.as_ref(), &self.fan, &|idx| self.oid_at_index(idx))
     }
 
     /// Given a `prefix`, find an object that matches it uniquely within this index and return `Some(Ok(entry_index))`.
@@ -141,7 +146,7 @@ impl index::File {
             prefix,
             candidates,
             &self.fan,
-            |idx| self.oid_at_index(idx),
+            &|idx| self.oid_at_index(idx),
             self.num_objects,
         )
     }
@@ -162,10 +167,10 @@ impl index::File {
             index::Version::V1 => self.iter().map(|e| e.pack_offset).collect(),
             index::Version::V2 => {
                 let offset32_start = &self.data[self.offset_pack_offset_v2()..];
+                let offsets32 = offset32_start.chunks_exact(N32_SIZE).take(self.num_objects as usize);
+                assert_eq!(self.num_objects as usize, offsets32.len());
                 let pack_offset_64_start = self.offset_pack_offset64_v2();
-                offset32_start
-                    .chunks(N32_SIZE)
-                    .take(self.num_objects as usize)
+                offsets32
                     .map(|offset| self.pack_offset_from_offset_v2(offset, pack_offset_64_start))
                     .collect()
             }
@@ -197,7 +202,7 @@ impl index::File {
             let from = pack64_offset + (ofs32 ^ N32_HIGH_BIT) as usize * N64_SIZE;
             crate::read_u64(&self.data[from..][..N64_SIZE])
         } else {
-            ofs32 as u64
+            u64::from(ofs32)
         }
     }
 }
@@ -206,7 +211,7 @@ pub(crate) fn lookup_prefix<'a>(
     prefix: gix_hash::Prefix,
     candidates: Option<&mut Range<EntryIndex>>,
     fan: &[u32; FAN_LEN],
-    oid_at_index: impl Fn(EntryIndex) -> &'a gix_hash::oid,
+    oid_at_index: &dyn Fn(EntryIndex) -> &'a gix_hash::oid,
     num_objects: u32,
 ) -> Option<PrefixLookupResult> {
     let first_byte = prefix.as_oid().first_byte() as usize;
@@ -266,11 +271,10 @@ pub(crate) fn lookup_prefix<'a>(
 }
 
 pub(crate) fn lookup<'a>(
-    id: impl AsRef<gix_hash::oid>,
+    id: &gix_hash::oid,
     fan: &[u32; FAN_LEN],
-    oid_at_index: impl Fn(EntryIndex) -> &'a gix_hash::oid,
+    oid_at_index: &dyn Fn(EntryIndex) -> &'a gix_hash::oid,
 ) -> Option<EntryIndex> {
-    let id = id.as_ref();
     let first_byte = id.first_byte() as usize;
     let mut upper_bound = fan[first_byte];
     let mut lower_bound = if first_byte != 0 { fan[first_byte - 1] } else { 0 };

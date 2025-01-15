@@ -4,7 +4,7 @@ pub use types::{Error, Options};
 mod util;
 
 pub(crate) mod function {
-    use std::{borrow::Cow, path::Path};
+    use std::{borrow::Cow, ffi::OsStr, path::Path};
 
     use gix_sec::Trust;
 
@@ -12,6 +12,7 @@ pub(crate) mod function {
     #[cfg(unix)]
     use crate::upwards::util::device_id;
     use crate::{
+        is::git_with_metadata as is_git_with_metadata,
         is_git,
         upwards::util::{find_ceiling_height, shorten_path_with_cwd},
         DOT_GIT_DIR,
@@ -24,26 +25,32 @@ pub(crate) mod function {
     // TODO: tests for trust-based discovery
     #[cfg_attr(not(unix), allow(unused_variables))]
     pub fn discover_opts(
-        directory: impl AsRef<Path>,
+        directory: &Path,
         Options {
             required_trust,
             ceiling_dirs,
             match_ceiling_dir_or_error,
             cross_fs,
             current_dir,
+            dot_git_only,
         }: Options<'_>,
     ) -> Result<(crate::repository::Path, Trust), Error> {
         // Normalize the path so that `Path::parent()` _actually_ gives
         // us the parent directory. (`Path::parent` just strips off the last
         // path component, which means it will not do what you expect when
-        // working with paths paths that contain '..'.)
-        let cwd = current_dir
-            .map(|cwd| Ok(Cow::Borrowed(cwd)))
-            .unwrap_or_else(|| std::env::current_dir().map(Cow::Owned))?;
-        let directory = directory.as_ref();
+        // working with paths that contain '..'.)
+        let cwd = current_dir.map_or_else(
+            || {
+                // The paths we return are relevant to the repository, but at this time it's impossible to know
+                // what `core.precomposeUnicode` is going to be. Hence, the one using these paths will have to
+                // transform the paths as needed, because we can't. `false` means to leave the obtained path as is.
+                gix_fs::current_dir(false).map(Cow::Owned)
+            },
+            |cwd| Ok(Cow::Borrowed(cwd)),
+        )?;
         #[cfg(windows)]
         let directory = dunce::simplified(directory);
-        let dir = gix_path::normalize(directory, cwd.as_ref()).ok_or_else(|| Error::InvalidInput {
+        let dir = gix_path::normalize(directory.into(), cwd.as_ref()).ok_or_else(|| Error::InvalidInput {
             directory: directory.into(),
         })?;
         let dir_metadata = dir.metadata().map_err(|_| Error::InaccessibleDirectory {
@@ -80,8 +87,9 @@ pub(crate) mod function {
 
         let mut cursor = dir.clone().into_owned();
         let mut current_height = 0;
+        let mut cursor_metadata = Some(dir_metadata);
         'outer: loop {
-            if max_height.map_or(false, |x| current_height > x) {
+            if max_height.is_some_and(|x| current_height > x) {
                 return Err(Error::NoGitRepositoryWithinCeiling {
                     path: dir.into_owned(),
                     ceiling_height: current_height,
@@ -91,13 +99,18 @@ pub(crate) mod function {
 
             #[cfg(unix)]
             if current_height != 0 && !cross_fs {
-                let metadata = if cursor.as_os_str().is_empty() {
-                    Path::new(".")
-                } else {
-                    cursor.as_ref()
-                }
-                .metadata()
-                .map_err(|_| Error::InaccessibleDirectory { path: cursor.clone() })?;
+                let metadata = cursor_metadata.take().map_or_else(
+                    || {
+                        if cursor.as_os_str().is_empty() {
+                            Path::new(".")
+                        } else {
+                            cursor.as_ref()
+                        }
+                        .metadata()
+                        .map_err(|_| Error::InaccessibleDirectory { path: cursor.clone() })
+                    },
+                    Ok,
+                )?;
 
                 if device_id(&metadata) != initial_device {
                     return Err(Error::NoGitRepositoryWithinFs {
@@ -105,13 +118,21 @@ pub(crate) mod function {
                         limit: cursor.clone(),
                     });
                 }
+                cursor_metadata = Some(metadata);
             }
 
-            for append_dot_git in &[false, true] {
-                if *append_dot_git {
+            let mut cursor_metadata_backup = None;
+            let started_as_dot_git = cursor.file_name() == Some(OsStr::new(DOT_GIT_DIR));
+            let dir_manipulation = if dot_git_only { &[true] as &[_] } else { &[true, false] };
+            for append_dot_git in dir_manipulation {
+                if *append_dot_git && !started_as_dot_git {
                     cursor.push(DOT_GIT_DIR);
+                    cursor_metadata_backup = cursor_metadata.take();
                 }
-                if let Ok(kind) = is_git(&cursor) {
+                if let Ok(kind) = match cursor_metadata.take() {
+                    Some(metadata) => is_git_with_metadata(&cursor, metadata, &cwd),
+                    None => is_git(&cursor),
+                } {
                     match filter_by_trust(&cursor)? {
                         Some(trust) => {
                             // TODO: test this more, it definitely doesn't always find the shortest path to a directory
@@ -121,11 +142,11 @@ pub(crate) mod function {
                                 cursor
                             };
                             break 'outer Ok((
-                                crate::repository::Path::from_dot_git_dir(path, kind, cwd).ok_or_else(|| {
-                                    Error::InvalidInput {
+                                crate::repository::Path::from_dot_git_dir(path, kind, cwd.as_ref()).ok_or_else(
+                                    || Error::InvalidInput {
                                         directory: directory.into(),
-                                    }
-                                })?,
+                                    },
+                                )?,
                                 trust,
                             ));
                         }
@@ -138,11 +159,16 @@ pub(crate) mod function {
                         }
                     }
                 }
-                if *append_dot_git {
+
+                // Usually `.git` (started_as_dot_git == true) will be a git dir, but if not we can quickly skip over it.
+                if *append_dot_git || started_as_dot_git {
                     cursor.pop();
+                    if let Some(metadata) = cursor_metadata_backup.take() {
+                        cursor_metadata = Some(metadata);
+                    }
                 }
             }
-            if cursor.parent().map_or(false, |p| p.as_os_str().is_empty()) {
+            if cursor.parent().is_some_and(|p| p.as_os_str().is_empty()) {
                 cursor = cwd.to_path_buf();
                 dir_made_absolute = true;
             }
@@ -150,7 +176,7 @@ pub(crate) mod function {
                 if dir_made_absolute
                     || matches!(
                         cursor.components().next(),
-                        Some(std::path::Component::RootDir) | Some(std::path::Component::Prefix(_))
+                        Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
                     )
                 {
                     break Err(Error::NoGitRepository { path: dir.into_owned() });
@@ -158,7 +184,7 @@ pub(crate) mod function {
                     dir_made_absolute = true;
                     debug_assert!(!cursor.as_os_str().is_empty());
                     // TODO: realpath or normalize? No test runs into this.
-                    cursor = gix_path::normalize(&cursor, cwd.as_ref())
+                    cursor = gix_path::normalize(cursor.clone().into(), cwd.as_ref())
                         .ok_or_else(|| Error::InvalidInput {
                             directory: cursor.clone(),
                         })?
@@ -172,7 +198,7 @@ pub(crate) mod function {
     /// the trust level derived from Path ownership.
     ///
     /// Fail if no valid-looking git repository could be found.
-    pub fn discover(directory: impl AsRef<Path>) -> Result<(crate::repository::Path, Trust), Error> {
+    pub fn discover(directory: &Path) -> Result<(crate::repository::Path, Trust), Error> {
         discover_opts(directory, Default::default())
     }
 }

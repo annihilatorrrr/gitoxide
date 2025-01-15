@@ -1,4 +1,3 @@
-#[cfg(test)]
 mod acquire {
     use std::time::{Duration, Instant};
 
@@ -15,7 +14,7 @@ mod acquire {
             .expect_err("the lock is taken and there is a failure obtaining it again")
             .to_string();
 
-        assert!(err_str.contains("the-resource could not be obtained immediately"));
+        assert!(err_str.contains("the-resource' could not be obtained immediately"));
         assert!(err_str.contains("the-resource.lock"), "it mentions the lockfile itself");
         Ok(())
     }
@@ -72,6 +71,16 @@ mod commit {
         let dir = tempfile::tempdir()?;
         let resource = dir.path().join("the-resource");
         let mark = gix_lock::Marker::acquire_to_hold_resource(resource, Fail::Immediately, None)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = mark.lock_path().metadata()?.permissions();
+            assert_ne!(
+                perms.mode() & !0o170000,
+                0o600,
+                "mode is more permissive now, even after passing the umask"
+            );
+        }
         let err = mark.commit().expect_err("should always fail");
         assert_eq!(err.error.kind(), std::io::ErrorKind::Other);
         assert_eq!(

@@ -2,10 +2,10 @@
 //! using an [accelerated data-structure][Snapshot].
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
@@ -36,7 +36,7 @@ pub mod snapshot;
 /// optionally name to find mappings to new names and/or emails.
 ///
 /// The memory layout is efficient, even though lots of small allocations are performed to store strings of emails and names.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug, Eq, PartialEq)]
 pub struct Snapshot {
     /// Sorted by `old_email`
     entries_by_old_email: Vec<snapshot::EmailEntry>,
@@ -49,9 +49,9 @@ pub struct Snapshot {
 ///
 /// Typically created by [parse()].
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy, Default)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry<'a> {
-    #[cfg_attr(feature = "serde1", serde(borrow))]
+    #[cfg_attr(feature = "serde", serde(borrow))]
     /// The name to map to.
     pub(crate) new_name: Option<&'a BStr>,
     /// The email map to.

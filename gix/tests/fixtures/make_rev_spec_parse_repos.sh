@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 
@@ -53,8 +53,8 @@ git init --bare blob.corrupt
   echo bnkxmdwz | git hash-object -w --stdin
   oid=$(echo bmwsjxzi | git hash-object -w --stdin)
   oidf=objects/$(oid_to_path "$oid")
-  chmod 755 $oidf
-  echo broken >$oidf
+  chmod -- 644 "$oidf"
+  echo broken >"$oidf"
 
   baseline "cafea"
   baseline "cafea^{object}"
@@ -101,7 +101,7 @@ git init ambiguous_blob_tree_commit
   # create one tree 0000000000cdc
   git write-tree
 
-  sed -e "s/|$//" >patch <<-EOF
+  sed -e "s/|$//" >patch <<EOF
 diff --git a/frotz b/frotz
 index 000000000..ffffff 100644
 --- a/frotz
@@ -338,6 +338,16 @@ git init complex_graph
   git add file && git commit -m A
   git branch a
 
+  git remote add origin .
+  cat <<EOF>>.git/config
+
+  [branch "main"]
+  	remote = origin
+  	merge = refs/heads/main
+EOF
+
+  git fetch
+
   baseline ":/message" # finds 'message recent' instead of 'initial message'
   baseline ":/!-message" # above, negated
   baseline ":/mes.age" # regexes work too
@@ -391,6 +401,11 @@ git init complex_graph
   baseline "@:"
   baseline "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+  baseline @{push}
+  baseline main@{push}
+  baseline main@{upstream}
+  baseline @{upstream}
+
   baseline "^"
   baseline "^!"
   baseline "..."
@@ -401,4 +416,12 @@ git init complex_graph
 git init new
 (cd new
   baseline '@{1}'
+)
+
+git init invalid-head
+(cd invalid-head
+  >file && git add file && git commit -m "init"
+  rm .git/refs/heads/main
+  baseline 'HEAD'
+  baseline 'HEAD:file'
 )

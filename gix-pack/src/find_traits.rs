@@ -12,11 +12,8 @@ use crate::{data, find};
 ///
 /// [issue]: https://github.com/rust-lang/rust/issues/44265
 pub trait Find {
-    /// The error returned by [`try_find()`][Find::try_find()]
-    type Error: std::error::Error + Send + Sync + 'static;
-
     /// Returns true if the object exists in the database.
-    fn contains(&self, id: impl AsRef<gix_hash::oid>) -> bool;
+    fn contains(&self, id: &gix_hash::oid) -> bool;
 
     /// Find an object matching `id` in the database while placing its raw, decoded data into `buffer`.
     /// A `pack_cache` can be used to speed up subsequent lookups, set it to [`crate::cache::Never`] if the
@@ -26,9 +23,9 @@ pub trait Find {
     /// or the error that occurred during lookup or object retrieval.
     fn try_find<'a>(
         &self,
-        id: impl AsRef<gix_hash::oid>,
+        id: &gix_hash::oid,
         buffer: &'a mut Vec<u8>,
-    ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, Self::Error> {
+    ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, gix_object::find::Error> {
         self.try_find_cached(id, buffer, &mut crate::cache::Never)
     }
 
@@ -40,16 +37,16 @@ pub trait Find {
     /// or the error that occurred during lookup or object retrieval.
     fn try_find_cached<'a>(
         &self,
-        id: impl AsRef<gix_hash::oid>,
+        id: &gix_hash::oid,
         buffer: &'a mut Vec<u8>,
-        pack_cache: &mut impl crate::cache::DecodeEntry,
-    ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, Self::Error>;
+        pack_cache: &mut dyn crate::cache::DecodeEntry,
+    ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, gix_object::find::Error>;
 
     /// Find the packs location where an object with `id` can be found in the database, or `None` if there is no pack
     /// holding the object.
     ///
     /// _Note_ that this is always None if the object isn't packed even though it exists as loose object.
-    fn location_by_oid(&self, id: impl AsRef<gix_hash::oid>, buf: &mut Vec<u8>) -> Option<data::entry::Location>;
+    fn location_by_oid(&self, id: &gix_hash::oid, buf: &mut Vec<u8>) -> Option<data::entry::Location>;
 
     /// Obtain a vector of all offsets, in index order, along with their object id.
     fn pack_offsets_and_oid(&self, pack_id: u32) -> Option<Vec<(data::Offset, gix_hash::ObjectId)>>;
@@ -69,32 +66,35 @@ pub trait Find {
 mod ext {
     use gix_object::{BlobRef, CommitRef, CommitRefIter, Kind, ObjectRef, TagRef, TagRefIter, TreeRef, TreeRefIter};
 
-    use crate::find;
-
     macro_rules! make_obj_lookup {
         ($method:ident, $object_variant:path, $object_kind:path, $object_type:ty) => {
             /// Like [`find(…)`][Self::find()], but flattens the `Result<Option<_>>` into a single `Result` making a non-existing object an error
             /// while returning the desired object type.
             fn $method<'a>(
                 &self,
-                id: impl AsRef<gix_hash::oid>,
+                id: &gix_hash::oid,
                 buffer: &'a mut Vec<u8>,
-            ) -> Result<($object_type, Option<crate::data::entry::Location>), find::existing_object::Error<Self::Error>>
+            ) -> Result<($object_type, Option<crate::data::entry::Location>), gix_object::find::existing_object::Error>
             {
                 let id = id.as_ref();
                 self.try_find(id, buffer)
-                    .map_err(find::existing_object::Error::Find)?
-                    .ok_or_else(|| find::existing_object::Error::NotFound {
+                    .map_err(gix_object::find::existing_object::Error::Find)?
+                    .ok_or_else(|| gix_object::find::existing_object::Error::NotFound {
                         oid: id.as_ref().to_owned(),
                     })
                     .and_then(|(o, l)| {
                         o.decode()
-                            .map_err(find::existing_object::Error::Decode)
+                            .map_err(|err| gix_object::find::existing_object::Error::Decode {
+                                source: err,
+                                oid: id.to_owned(),
+                            })
                             .map(|o| (o, l))
                     })
                     .and_then(|(o, l)| match o {
                         $object_variant(o) => return Ok((o, l)),
-                        _other => Err(find::existing_object::Error::ObjectKind {
+                        o => Err(gix_object::find::existing_object::Error::ObjectKind {
+                            oid: id.to_owned(),
+                            actual: o.kind(),
                             expected: $object_kind,
                         }),
                     })
@@ -108,18 +108,20 @@ mod ext {
             /// while returning the desired iterator type.
             fn $method<'a>(
                 &self,
-                id: impl AsRef<gix_hash::oid>,
+                id: &gix_hash::oid,
                 buffer: &'a mut Vec<u8>,
-            ) -> Result<($object_type, Option<crate::data::entry::Location>), find::existing_iter::Error<Self::Error>> {
+            ) -> Result<($object_type, Option<crate::data::entry::Location>), gix_object::find::existing_iter::Error> {
                 let id = id.as_ref();
                 self.try_find(id, buffer)
-                    .map_err(find::existing_iter::Error::Find)?
-                    .ok_or_else(|| find::existing_iter::Error::NotFound {
+                    .map_err(gix_object::find::existing_iter::Error::Find)?
+                    .ok_or_else(|| gix_object::find::existing_iter::Error::NotFound {
                         oid: id.as_ref().to_owned(),
                     })
                     .and_then(|(o, l)| {
                         o.$into_iter()
-                            .ok_or_else(|| find::existing_iter::Error::ObjectKind {
+                            .ok_or_else(|| gix_object::find::existing_iter::Error::ObjectKind {
+                                oid: id.to_owned(),
+                                actual: o.kind,
                                 expected: $object_kind,
                             })
                             .map(|i| (i, l))
@@ -133,14 +135,13 @@ mod ext {
         /// Like [`try_find(…)`][super::Find::try_find()], but flattens the `Result<Option<_>>` into a single `Result` making a non-existing object an error.
         fn find<'a>(
             &self,
-            id: impl AsRef<gix_hash::oid>,
+            id: &gix_hash::oid,
             buffer: &'a mut Vec<u8>,
-        ) -> Result<(gix_object::Data<'a>, Option<crate::data::entry::Location>), find::existing::Error<Self::Error>>
+        ) -> Result<(gix_object::Data<'a>, Option<crate::data::entry::Location>), gix_object::find::existing::Error>
         {
-            let id = id.as_ref();
             self.try_find(id, buffer)
-                .map_err(find::existing::Error::Find)?
-                .ok_or_else(|| find::existing::Error::NotFound {
+                .map_err(gix_object::find::existing::Error::Find)?
+                .ok_or_else(|| gix_object::find::existing::Error::NotFound {
                     oid: id.as_ref().to_owned(),
                 })
         }
@@ -154,7 +155,7 @@ mod ext {
         make_iter_lookup!(find_tag_iter, Kind::Tag, TagRefIter<'a>, try_into_tag_iter);
     }
 
-    impl<T: super::Find> FindExt for T {}
+    impl<T: super::Find + ?Sized> FindExt for T {}
 }
 pub use ext::FindExt;
 
@@ -169,22 +170,20 @@ mod find_impls {
     where
         T: crate::Find,
     {
-        type Error = T::Error;
-
-        fn contains(&self, id: impl AsRef<oid>) -> bool {
+        fn contains(&self, id: &oid) -> bool {
             (*self).contains(id)
         }
 
         fn try_find_cached<'a>(
             &self,
-            id: impl AsRef<oid>,
+            id: &oid,
             buffer: &'a mut Vec<u8>,
-            pack_cache: &mut impl crate::cache::DecodeEntry,
-        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, Self::Error> {
+            pack_cache: &mut dyn crate::cache::DecodeEntry,
+        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, gix_object::find::Error> {
             (*self).try_find_cached(id, buffer, pack_cache)
         }
 
-        fn location_by_oid(&self, id: impl AsRef<oid>, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
+        fn location_by_oid(&self, id: &oid, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
             (*self).location_by_oid(id, buf)
         }
 
@@ -201,22 +200,20 @@ mod find_impls {
     where
         T: super::Find,
     {
-        type Error = T::Error;
-
-        fn contains(&self, id: impl AsRef<oid>) -> bool {
+        fn contains(&self, id: &oid) -> bool {
             self.deref().contains(id)
         }
 
         fn try_find_cached<'a>(
             &self,
-            id: impl AsRef<oid>,
+            id: &oid,
             buffer: &'a mut Vec<u8>,
-            pack_cache: &mut impl crate::cache::DecodeEntry,
-        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, Self::Error> {
+            pack_cache: &mut dyn crate::cache::DecodeEntry,
+        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, gix_object::find::Error> {
             self.deref().try_find_cached(id, buffer, pack_cache)
         }
 
-        fn location_by_oid(&self, id: impl AsRef<oid>, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
+        fn location_by_oid(&self, id: &oid, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
             self.deref().location_by_oid(id, buf)
         }
 
@@ -233,22 +230,20 @@ mod find_impls {
     where
         T: super::Find,
     {
-        type Error = T::Error;
-
-        fn contains(&self, id: impl AsRef<oid>) -> bool {
+        fn contains(&self, id: &oid) -> bool {
             self.deref().contains(id)
         }
 
         fn try_find_cached<'a>(
             &self,
-            id: impl AsRef<oid>,
+            id: &oid,
             buffer: &'a mut Vec<u8>,
-            pack_cache: &mut impl crate::cache::DecodeEntry,
-        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, Self::Error> {
+            pack_cache: &mut dyn crate::cache::DecodeEntry,
+        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, gix_object::find::Error> {
             self.deref().try_find_cached(id, buffer, pack_cache)
         }
 
-        fn location_by_oid(&self, id: impl AsRef<oid>, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
+        fn location_by_oid(&self, id: &oid, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
             self.deref().location_by_oid(id, buf)
         }
 
@@ -265,22 +260,20 @@ mod find_impls {
     where
         T: super::Find,
     {
-        type Error = T::Error;
-
-        fn contains(&self, id: impl AsRef<oid>) -> bool {
+        fn contains(&self, id: &oid) -> bool {
             self.deref().contains(id)
         }
 
         fn try_find_cached<'a>(
             &self,
-            id: impl AsRef<oid>,
+            id: &oid,
             buffer: &'a mut Vec<u8>,
-            pack_cache: &mut impl crate::cache::DecodeEntry,
-        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, Self::Error> {
+            pack_cache: &mut dyn crate::cache::DecodeEntry,
+        ) -> Result<Option<(gix_object::Data<'a>, Option<data::entry::Location>)>, gix_object::find::Error> {
             self.deref().try_find_cached(id, buffer, pack_cache)
         }
 
-        fn location_by_oid(&self, id: impl AsRef<oid>, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
+        fn location_by_oid(&self, id: &oid, buf: &mut Vec<u8>) -> Option<data::entry::Location> {
             self.deref().location_by_oid(id, buf)
         }
 

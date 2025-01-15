@@ -20,9 +20,9 @@ pub fn init_env_logger() {
 }
 
 #[cfg(feature = "prodash-render-line")]
-pub fn progress_tree() -> std::sync::Arc<prodash::tree::Root> {
+pub fn progress_tree(trace: bool) -> std::sync::Arc<prodash::tree::Root> {
     prodash::tree::root::Options {
-        message_buffer_capacity: 200,
+        message_buffer_capacity: if trace { 10_000 } else { 200 },
         ..Default::default()
     }
     .into()
@@ -55,6 +55,7 @@ pub mod pretty {
     #[cfg(feature = "small")]
     pub fn prepare_and_run<T>(
         name: &str,
+        trace: bool,
         verbose: bool,
         progress: bool,
         #[cfg_attr(not(feature = "prodash-render-tui"), allow(unused_variables))] progress_keep_open: bool,
@@ -76,7 +77,7 @@ pub mod pretty {
                 run(progress::DoOrDiscard::from(None), &mut stdout_lock, &mut stderr_lock)
             }
             (true, false) => {
-                let progress = crate::shared::progress_tree();
+                let progress = crate::shared::progress_tree(trace);
                 let sub_progress = progress.add_child(name);
 
                 use crate::shared::{self, STANDARD_RANGE};
@@ -89,15 +90,51 @@ pub mod pretty {
                 res
             }
             #[cfg(not(feature = "prodash-render-tui"))]
-            (true, true) | (false, true) => {
+            (_, true) => {
                 unreachable!("BUG: This branch can't be run without a TUI built-in")
             }
         }
     }
 
+    #[cfg(feature = "tracing")]
+    fn init_tracing(
+        enable: bool,
+        reverse_lines: bool,
+        progress: &gix::progress::prodash::tree::Root,
+    ) -> anyhow::Result<()> {
+        if enable {
+            let processor = tracing_forest::Printer::new().formatter({
+                let progress = std::sync::Mutex::new(progress.add_child("tracing"));
+                move |tree: &tracing_forest::tree::Tree| -> Result<String, std::fmt::Error> {
+                    use gix::Progress;
+                    use tracing_forest::Formatter;
+                    let progress = &mut progress.lock().unwrap();
+                    let tree = tracing_forest::printer::Pretty.fmt(tree)?;
+                    if reverse_lines {
+                        for line in tree.lines().rev() {
+                            progress.info(line.into());
+                        }
+                    } else {
+                        for line in tree.lines() {
+                            progress.info(line.into());
+                        }
+                    }
+                    Ok(String::new())
+                }
+            });
+            use tracing_subscriber::layer::SubscriberExt;
+            let subscriber = tracing_subscriber::Registry::default().with(tracing_forest::ForestLayer::from(processor));
+            tracing::subscriber::set_global_default(subscriber)?;
+        } else {
+            tracing::subscriber::set_global_default(tracing_subscriber::Registry::default())?;
+        }
+        Ok(())
+    }
+
     #[cfg(not(feature = "small"))]
     pub fn prepare_and_run<T: Send + 'static>(
         name: &str,
+        trace: bool,
         verbose: bool,
         progress: bool,
         #[cfg_attr(not(feature = "prodash-render-tui"), allow(unused_variables))] progress_keep_open: bool,
@@ -113,28 +150,36 @@ pub mod pretty {
         crate::shared::init_env_logger();
 
         match (verbose, progress) {
-            (false, false) => run(progress::DoOrDiscard::from(None), &mut stdout(), &mut stderr()),
+            (false, false) => {
+                let stdout = stdout();
+                let mut stdout_lock = stdout.lock();
+                run(progress::DoOrDiscard::from(None), &mut stdout_lock, &mut stderr())
+            }
             (true, false) => {
                 use crate::shared::{self, STANDARD_RANGE};
-                let progress = shared::progress_tree();
+                let progress = shared::progress_tree(trace);
                 let sub_progress = progress.add_child(name);
+                init_tracing(trace, false, &progress)?;
 
                 let handle = shared::setup_line_renderer_range(&progress, range.into().unwrap_or(STANDARD_RANGE));
 
                 let mut out = Vec::<u8>::new();
                 let mut err = Vec::<u8>::new();
-                let res = run(progress::DoOrDiscard::from(Some(sub_progress)), &mut out, &mut err);
+
+                let res = gix::trace::coarse!("run")
+                    .into_scope(|| run(progress::DoOrDiscard::from(Some(sub_progress)), &mut out, &mut err));
+
                 handle.shutdown_and_wait();
                 std::io::Write::write_all(&mut stdout(), &out)?;
                 std::io::Write::write_all(&mut stderr(), &err)?;
                 res
             }
             #[cfg(not(feature = "prodash-render-tui"))]
-            (true, true) | (false, true) => {
+            (_, true) => {
                 unreachable!("BUG: This branch can't be run without a TUI built-in")
             }
             #[cfg(feature = "prodash-render-tui")]
-            (true, true) | (false, true) => {
+            (_, true) => {
                 use std::io::Write;
 
                 use crate::shared;
@@ -145,6 +190,7 @@ pub mod pretty {
                 }
                 let progress = prodash::tree::Root::new();
                 let sub_progress = progress.add_child(name);
+
                 let render_tui = prodash::render::tui(
                     stdout(),
                     std::sync::Arc::downgrade(&progress),
@@ -165,12 +211,18 @@ pub mod pretty {
                         tx.send(Event::UiDone).ok();
                     }
                 });
-                let thread = std::thread::spawn(move || {
-                    // We might have something interesting to show, which would be hidden by the alternate screen if there is a progress TUI
-                    // We know that the printing happens at the end, so this is fine.
-                    let mut out = Vec::new();
-                    let res = run(progress::DoOrDiscard::from(Some(sub_progress)), &mut out, &mut stderr());
-                    tx.send(Event::ComputationDone(res, out)).ok();
+                let thread = std::thread::spawn({
+                    let name = name.to_owned();
+                    move || {
+                        let _trace = init_tracing(trace, true, &progress).ok();
+                        // We might have something interesting to show, which would be hidden by the alternate screen if there is a progress TUI
+                        // We know that the printing happens at the end, so this is fine.
+                        let mut out = Vec::new();
+                        let res = gix::trace::coarse!("run", name = name).into_scope(|| {
+                            run(progress::DoOrDiscard::from(Some(sub_progress)), &mut out, &mut stderr())
+                        });
+                        tx.send(Event::ComputationDone(res, out)).ok();
+                    }
                 });
                 loop {
                     match rx.recv() {
@@ -216,28 +268,6 @@ pub fn setup_line_renderer_range(
         }
         .auto_configure(prodash::render::line::StreamKind::Stderr),
     )
-}
-
-#[cfg(all(feature = "lean-cli", not(feature = "pretty-cli")))]
-pub fn from_env<T: argh::TopLevelCommand>() -> T {
-    static VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
-    let strings: Vec<String> = std::env::args().collect();
-    let strs: Vec<&str> = strings.iter().map(|s| s.as_str()).collect();
-    T::from_args(&[strs[0]], &strs[1..]).unwrap_or_else(|early_exit| {
-        // This allows us to make subcommands mandatory,
-        // and trigger a helpful message unless --version is specified
-        if let Some(arg) = std::env::args().nth(1) {
-            if arg == "--version" {
-                println!("{}", VERSION);
-                std::process::exit(0);
-            }
-        }
-        println!("{}", early_exit.output);
-        std::process::exit(match early_exit.status {
-            Ok(()) => 0,
-            Err(()) => 1,
-        })
-    })
 }
 
 mod clap {
@@ -291,5 +321,124 @@ mod clap {
             Some(Box::new([PossibleValue::new("SHA1")].into_iter()))
         }
     }
+
+    use clap::builder::{OsStringValueParser, StringValueParser, TypedValueParser};
+
+    #[derive(Clone)]
+    pub struct AsPathSpec;
+
+    static PATHSPEC_DEFAULTS: once_cell::sync::Lazy<gix::pathspec::Defaults> = once_cell::sync::Lazy::new(|| {
+        gix::pathspec::Defaults::from_environment(&mut |n| std::env::var_os(n)).unwrap_or_default()
+    });
+
+    impl TypedValueParser for AsPathSpec {
+        type Value = gix::pathspec::Pattern;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            OsStringValueParser::new()
+                .try_map(|arg| {
+                    let arg: &std::path::Path = arg.as_os_str().as_ref();
+                    gix::pathspec::parse(gix::path::into_bstr(arg).as_ref(), *PATHSPEC_DEFAULTS)
+                })
+                .parse_ref(cmd, arg, value)
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct CheckPathSpec;
+
+    impl TypedValueParser for CheckPathSpec {
+        type Value = BString;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            OsStringValueParser::new()
+                .try_map(|arg| -> Result<_, gix::pathspec::parse::Error> {
+                    let arg = gix::path::into_bstr(std::path::PathBuf::from(arg));
+                    gix::pathspec::parse(arg.as_ref(), Default::default())?;
+                    Ok(arg.into_owned())
+                })
+                .parse_ref(cmd, arg, value)
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct ParseRenameFraction;
+
+    impl TypedValueParser for ParseRenameFraction {
+        type Value = f32;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            StringValueParser::new()
+                .try_map(|arg: String| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                    if arg.ends_with('%') {
+                        let val = u32::from_str(&arg[..arg.len() - 1])?;
+                        Ok(val as f32 / 100.0)
+                    } else {
+                        let val = u32::from_str(&arg)?;
+                        let num = format!("0.{val}");
+                        Ok(f32::from_str(&num)?)
+                    }
+                })
+                .parse_ref(cmd, arg, value)
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct AsTime;
+
+    impl TypedValueParser for AsTime {
+        type Value = gix::date::Time;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            StringValueParser::new()
+                .try_map(|arg| gix::date::parse(&arg, Some(std::time::SystemTime::now())))
+                .parse_ref(cmd, arg, value)
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct AsPartialRefName;
+
+    impl TypedValueParser for AsPartialRefName {
+        type Value = gix::refs::PartialName;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            AsBString
+                .try_map(gix::refs::PartialName::try_from)
+                .parse_ref(cmd, arg, value)
+        }
+    }
 }
-pub use self::clap::{AsBString, AsHashKind, AsOutputFormat};
+pub use self::clap::{
+    AsBString, AsHashKind, AsOutputFormat, AsPartialRefName, AsPathSpec, AsTime, CheckPathSpec, ParseRenameFraction,
+};
+
+#[cfg(test)]
+mod value_parser_tests {
+    use super::ParseRenameFraction;
+    use clap::Parser;
+
+    #[test]
+    fn rename_fraction() {
+        #[derive(Debug, clap::Parser)]
+        pub struct Cmd {
+            #[clap(long, short='a', value_parser = ParseRenameFraction)]
+            pub arg: Option<Option<f32>>,
+        }
+
+        let c = Cmd::parse_from(["cmd", "-a"]);
+        assert_eq!(c.arg, Some(None), "this means we need to fill in the default");
+
+        let c = Cmd::parse_from(["cmd", "-a=50%"]);
+        assert_eq!(c.arg, Some(Some(0.5)), "percentages become a fraction");
+
+        let c = Cmd::parse_from(["cmd", "-a=100%"]);
+        assert_eq!(c.arg, Some(Some(1.0)));
+
+        let c = Cmd::parse_from(["cmd", "-a=5"]);
+        assert_eq!(c.arg, Some(Some(0.5)), "another way to specify fractions");
+
+        let c = Cmd::parse_from(["cmd", "-a=75"]);
+        assert_eq!(c.arg, Some(Some(0.75)));
+    }
+}

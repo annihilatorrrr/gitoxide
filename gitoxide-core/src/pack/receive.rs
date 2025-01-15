@@ -1,28 +1,30 @@
-use std::{
-    borrow::Cow,
-    io,
-    path::PathBuf,
-    sync::{atomic::AtomicBool, Arc},
-};
-
+use crate::net;
+use crate::pack::receive::protocol::fetch::negotiate;
+use crate::OutputFormat;
+use gix::config::tree::Key;
+use gix::protocol::maybe_async;
+use gix::remote::fetch::Error;
+use gix::DynNestedProgress;
 pub use gix::{
     hash::ObjectId,
     objs::bstr::{BString, ByteSlice},
     odb::pack,
     protocol,
     protocol::{
-        fetch::{Action, Arguments, Response},
+        fetch::{Arguments, Response},
         handshake::Ref,
         transport,
         transport::client::Capabilities,
     },
-    Progress,
+    NestedProgress, Progress,
+};
+use std::{
+    io,
+    path::PathBuf,
+    sync::{atomic::AtomicBool, Arc},
 };
 
-use crate::OutputFormat;
-
 pub const PROGRESS_RANGE: std::ops::RangeInclusive<u8> = 1..=3;
-
 pub struct Context<W> {
     pub thread_limit: Option<usize>,
     pub format: OutputFormat,
@@ -31,249 +33,152 @@ pub struct Context<W> {
     pub object_hash: gix::hash::Kind,
 }
 
-struct CloneDelegate<W> {
-    ctx: Context<W>,
+#[maybe_async::maybe_async]
+pub async fn receive<P, W>(
+    protocol: Option<net::Protocol>,
+    url: &str,
     directory: Option<PathBuf>,
     refs_directory: Option<PathBuf>,
-    ref_filter: Option<&'static [&'static str]>,
-    wanted_refs: Vec<BString>,
-}
-static FILTER: &[&str] = &["HEAD", "refs/tags", "refs/heads"];
+    mut wanted_refs: Vec<BString>,
+    mut progress: P,
+    ctx: Context<W>,
+) -> anyhow::Result<()>
+where
+    W: std::io::Write,
+    P: NestedProgress + 'static,
+    P::SubProgress: 'static,
+{
+    let mut transport = net::connect(
+        url,
+        gix::protocol::transport::client::connect::Options {
+            version: protocol.unwrap_or_default().into(),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let trace_packetlines = std::env::var_os(
+        gix::config::tree::Gitoxide::TRACE_PACKET
+            .environment_override()
+            .expect("set"),
+    )
+    .is_some();
 
-fn remote_supports_ref_in_want(server: &Capabilities) -> bool {
-    server
-        .capability("fetch")
-        .and_then(|cap| cap.supports("ref-in-want"))
-        .unwrap_or(false)
-}
+    let agent = gix::protocol::agent(gix::env::agent());
+    let mut handshake = gix::protocol::fetch::handshake(
+        &mut transport.inner,
+        gix::protocol::credentials::builtin,
+        vec![("agent".into(), Some(agent.clone()))],
+        &mut progress,
+    )
+    .await?;
+    if wanted_refs.is_empty() {
+        wanted_refs.push("refs/heads/*:refs/remotes/origin/*".into());
+    }
+    let fetch_refspecs: Vec<_> = wanted_refs
+        .into_iter()
+        .map(|ref_name| {
+            gix::refspec::parse(ref_name.as_bstr(), gix::refspec::parse::Operation::Fetch).map(|r| r.to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    let user_agent = ("agent", Some(agent.clone().into()));
+    let refmap = gix::protocol::fetch::RefMap::new(
+        &mut progress,
+        &fetch_refspecs,
+        gix::protocol::fetch::Context {
+            handshake: &mut handshake,
+            transport: &mut transport.inner,
+            user_agent: user_agent.clone(),
+            trace_packetlines,
+        },
+        gix::protocol::fetch::refmap::init::Options::default(),
+    )
+    .await?;
 
-impl<W> protocol::fetch::DelegateBlocking for CloneDelegate<W> {
-    fn prepare_ls_refs(
-        &mut self,
-        server: &Capabilities,
-        arguments: &mut Vec<BString>,
-        _features: &mut Vec<(&str, Option<Cow<'_, str>>)>,
-    ) -> io::Result<ls_refs::Action> {
-        if server.contains("ls-refs") {
-            arguments.extend(FILTER.iter().map(|r| format!("ref-prefix {}", r).into()));
+    if refmap.mappings.is_empty() && !refmap.remote_refs.is_empty() {
+        return Err(Error::NoMapping {
+            refspecs: refmap.refspecs.clone(),
+            num_remote_refs: refmap.remote_refs.len(),
         }
-        Ok(if self.wanted_refs.is_empty() {
-            ls_refs::Action::Continue
-        } else {
-            ls_refs::Action::Skip
+        .into());
+    }
+
+    let mut negotiate = Negotiate { refmap: &refmap };
+    gix::protocol::fetch(
+        &mut negotiate,
+        |read_pack, progress, should_interrupt| {
+            receive_pack_blocking(
+                directory,
+                refs_directory,
+                read_pack,
+                progress,
+                &refmap.remote_refs,
+                should_interrupt,
+                ctx.out,
+                ctx.thread_limit,
+                ctx.object_hash,
+                ctx.format,
+            )
+            .map(|_| true)
+        },
+        progress,
+        &ctx.should_interrupt,
+        gix::protocol::fetch::Context {
+            handshake: &mut handshake,
+            transport: &mut transport.inner,
+            user_agent,
+            trace_packetlines,
+        },
+        gix::protocol::fetch::Options {
+            shallow_file: "no shallow file required as we reject it to keep it simple".into(),
+            shallow: &Default::default(),
+            tags: Default::default(),
+            reject_shallow_remote: true,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+struct Negotiate<'a> {
+    refmap: &'a gix::protocol::fetch::RefMap,
+}
+
+impl gix::protocol::fetch::Negotiate for Negotiate<'_> {
+    fn mark_complete_and_common_ref(&mut self) -> Result<negotiate::Action, negotiate::Error> {
+        Ok(negotiate::Action::MustNegotiate {
+            remote_ref_target_known: vec![], /* we don't really negotiate */
         })
     }
 
-    fn prepare_fetch(
-        &mut self,
-        version: transport::Protocol,
-        server: &Capabilities,
-        _features: &mut Vec<(&str, Option<Cow<'_, str>>)>,
-        _refs: &[Ref],
-    ) -> io::Result<Action> {
-        if !self.wanted_refs.is_empty() && !remote_supports_ref_in_want(server) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Want to get specific refs, but remote doesn't support this capability",
-            ));
+    fn add_wants(&mut self, arguments: &mut Arguments, _remote_ref_target_known: &[bool]) -> bool {
+        let mut has_want = false;
+        for id in self.refmap.mappings.iter().filter_map(|m| m.remote.as_id()) {
+            arguments.want(id);
+            has_want = true;
         }
-        if version == transport::Protocol::V1 {
-            self.ref_filter = Some(FILTER);
-        }
-        Ok(Action::Continue)
+        has_want
     }
 
-    fn negotiate(
+    fn one_round(
         &mut self,
-        refs: &[Ref],
-        arguments: &mut Arguments,
+        _state: &mut negotiate::one_round::State,
+        _arguments: &mut Arguments,
         _previous_response: Option<&Response>,
-    ) -> io::Result<Action> {
-        if self.wanted_refs.is_empty() {
-            for r in refs {
-                let (path, id, _) = r.unpack();
-                if let Some(id) = id {
-                    match self.ref_filter {
-                        Some(ref_prefixes) => {
-                            if ref_prefixes.iter().any(|prefix| path.starts_with_str(prefix)) {
-                                arguments.want(id);
-                            }
-                        }
-                        None => arguments.want(id),
-                    }
-                }
-            }
-        } else {
-            for r in &self.wanted_refs {
-                arguments.want_ref(r.as_ref())
-            }
-        }
-        Ok(Action::Cancel)
-    }
-}
-
-#[cfg(feature = "blocking-client")]
-mod blocking_io {
-    use std::{io, io::BufRead, path::PathBuf};
-
-    use gix::{
-        bstr::BString,
-        protocol,
-        protocol::{fetch::Response, handshake::Ref},
-        Progress,
-    };
-
-    use super::{receive_pack_blocking, CloneDelegate, Context};
-    use crate::net;
-
-    impl<W: io::Write> protocol::fetch::Delegate for CloneDelegate<W> {
-        fn receive_pack(
-            &mut self,
-            input: impl BufRead,
-            progress: impl Progress,
-            refs: &[Ref],
-            _previous_response: &Response,
-        ) -> io::Result<()> {
-            receive_pack_blocking(
-                self.directory.take(),
-                self.refs_directory.take(),
-                &mut self.ctx,
-                input,
-                progress,
-                refs,
-            )
-        }
-    }
-
-    pub fn receive<P, W>(
-        protocol: Option<net::Protocol>,
-        url: &str,
-        directory: Option<PathBuf>,
-        refs_directory: Option<PathBuf>,
-        wanted_refs: Vec<BString>,
-        progress: P,
-        ctx: Context<W>,
-    ) -> anyhow::Result<()>
-    where
-        W: std::io::Write,
-        P: Progress,
-        P::SubProgress: 'static,
-    {
-        let transport = net::connect(
-            url,
-            gix::protocol::transport::client::connect::Options {
-                version: protocol.unwrap_or_default().into(),
-                ..Default::default()
+    ) -> Result<(negotiate::Round, bool), negotiate::Error> {
+        Ok((
+            negotiate::Round {
+                haves_sent: 0,
+                in_vain: 0,
+                haves_to_send: 0,
+                previous_response_had_at_least_one_in_common: false,
             },
-        )?;
-        let delegate = CloneDelegate {
-            ctx,
-            directory,
-            refs_directory,
-            ref_filter: None,
-            wanted_refs,
-        };
-        protocol::fetch(
-            transport,
-            delegate,
-            protocol::credentials::builtin,
-            progress,
-            protocol::FetchConnection::TerminateOnSuccessfulCompletion,
-            gix::env::agent(),
-        )?;
-        Ok(())
+            // is done
+            true,
+        ))
     }
 }
 
-#[cfg(feature = "blocking-client")]
-pub use blocking_io::receive;
-use gix::protocol::ls_refs;
-
-#[cfg(feature = "async-client")]
-mod async_io {
-    use std::{io, io::BufRead, path::PathBuf};
-
-    use async_trait::async_trait;
-    use futures_io::AsyncBufRead;
-
-    use gix::{
-        bstr::{BString, ByteSlice},
-        odb::pack,
-        protocol,
-        protocol::{fetch::Response, handshake::Ref},
-        Progress,
-    };
-
-    use super::{print, receive_pack_blocking, write_raw_refs, CloneDelegate, Context};
-    use crate::{net, OutputFormat};
-
-    #[async_trait(?Send)]
-    impl<W: io::Write + Send + 'static> protocol::fetch::Delegate for CloneDelegate<W> {
-        async fn receive_pack(
-            &mut self,
-            input: impl AsyncBufRead + Unpin + 'async_trait,
-            progress: impl Progress,
-            refs: &[Ref],
-            _previous_response: &Response,
-        ) -> io::Result<()> {
-            receive_pack_blocking(
-                self.directory.take(),
-                self.refs_directory.take(),
-                &mut self.ctx,
-                futures_lite::io::BlockOn::new(input),
-                progress,
-                &refs,
-            )
-        }
-    }
-
-    pub async fn receive<P, W>(
-        protocol: Option<net::Protocol>,
-        url: &str,
-        directory: Option<PathBuf>,
-        refs_directory: Option<PathBuf>,
-        wanted_refs: Vec<BString>,
-        progress: P,
-        ctx: Context<W>,
-    ) -> anyhow::Result<()>
-    where
-        P: Progress + 'static,
-        W: io::Write + Send + 'static,
-    {
-        let transport = net::connect(
-            url,
-            gix::protocol::transport::client::connect::Options {
-                version: protocol.unwrap_or_default().into(),
-                ..Default::default()
-            },
-        )
-        .await?;
-        let mut delegate = CloneDelegate {
-            ctx,
-            directory,
-            refs_directory,
-            ref_filter: None,
-            wanted_refs,
-        };
-        blocking::unblock(move || {
-            futures_lite::future::block_on(protocol::fetch(
-                transport,
-                delegate,
-                protocol::credentials::builtin,
-                progress,
-                protocol::FetchConnection::TerminateOnSuccessfulCompletion,
-                gix::env::agent(),
-            ))
-        })
-        .await?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "async-client")]
-pub use self::async_io::receive;
-
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JsonBundleWriteOutcome {
     pub index_version: pack::index::Version,
     pub index_hash: String,
@@ -293,7 +198,7 @@ impl From<pack::index::write::Outcome> for JsonBundleWriteOutcome {
     }
 }
 
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JsonOutcome {
     pub index: JsonBundleWriteOutcome,
     pub pack_kind: pack::data::Version,
@@ -319,7 +224,7 @@ impl JsonOutcome {
 fn print_hash_and_path(out: &mut impl io::Write, name: &str, id: ObjectId, path: Option<PathBuf>) -> io::Result<()> {
     match path {
         Some(path) => writeln!(out, "{}: {} ({})", name, id, path.display()),
-        None => writeln!(out, "{}: {}", name, id),
+        None => writeln!(out, "{name}: {id}"),
     }
 }
 
@@ -340,13 +245,13 @@ fn write_raw_refs(refs: &[Ref], directory: PathBuf) -> std::io::Result<()> {
     for r in refs {
         let (path, content) = match r {
             Ref::Unborn { full_ref_name, target } => {
-                (assure_dir_exists(full_ref_name)?, format!("unborn HEAD: {}", target))
+                (assure_dir_exists(full_ref_name)?, format!("unborn HEAD: {target}"))
             }
             Ref::Symbolic {
                 full_ref_name: path,
                 target,
                 ..
-            } => (assure_dir_exists(path)?, format!("ref: {}", target)),
+            } => (assure_dir_exists(path)?, format!("ref: {target}")),
             Ref::Peeled {
                 full_ref_name: path,
                 tag: object,
@@ -362,33 +267,44 @@ fn write_raw_refs(refs: &[Ref], directory: PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
-fn receive_pack_blocking<W: io::Write>(
+#[allow(clippy::too_many_arguments)]
+fn receive_pack_blocking(
     mut directory: Option<PathBuf>,
     mut refs_directory: Option<PathBuf>,
-    ctx: &mut Context<W>,
-    input: impl io::BufRead,
-    progress: impl Progress,
+    mut input: impl io::BufRead,
+    progress: &mut dyn DynNestedProgress,
     refs: &[Ref],
+    should_interrupt: &AtomicBool,
+    mut out: impl std::io::Write,
+    thread_limit: Option<usize>,
+    object_hash: gix::hash::Kind,
+    format: OutputFormat,
 ) -> io::Result<()> {
     let options = pack::bundle::write::Options {
-        thread_limit: ctx.thread_limit,
+        thread_limit,
         index_version: pack::index::Version::V2,
         iteration_mode: pack::data::input::Mode::Verify,
-        object_hash: ctx.object_hash,
+        object_hash,
     };
-    let outcome =
-        pack::Bundle::write_to_directory(input, directory.take(), progress, &ctx.should_interrupt, None, options)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    let outcome = pack::Bundle::write_to_directory(
+        &mut input,
+        directory.take().as_deref(),
+        progress,
+        should_interrupt,
+        None::<gix::objs::find::Never>,
+        options,
+    )
+    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
     if let Some(directory) = refs_directory.take() {
         write_raw_refs(refs, directory)?;
     }
 
-    match ctx.format {
-        OutputFormat::Human => drop(print(&mut ctx.out, outcome, refs)),
-        #[cfg(feature = "serde1")]
+    match format {
+        OutputFormat::Human => drop(print(&mut out, outcome, refs)),
+        #[cfg(feature = "serde")]
         OutputFormat::Json => {
-            serde_json::to_writer_pretty(&mut ctx.out, &JsonOutcome::from_outcome_and_refs(outcome, refs))?
+            serde_json::to_writer_pretty(&mut out, &JsonOutcome::from_outcome_and_refs(outcome, refs))?;
         }
     };
     Ok(())

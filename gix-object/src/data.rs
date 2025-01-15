@@ -67,13 +67,8 @@ pub mod verify {
         /// Compute the checksum of `self` and compare it with the `desired` hash.
         /// If the hashes do not match, an [`Error`] is returned, containing the actual
         /// hash of `self`.
-        pub fn verify_checksum(&self, desired: impl AsRef<gix_hash::oid>) -> Result<(), Error> {
-            let desired = desired.as_ref();
-            let mut hasher = gix_features::hash::hasher(desired.kind());
-            hasher.update(&crate::encode::loose_header(self.kind, self.data.len()));
-            hasher.update(self.data);
-
-            let actual_id = gix_hash::ObjectId::from(hasher.digest());
+        pub fn verify_checksum(&self, desired: &gix_hash::oid) -> Result<(), Error> {
+            let actual_id = crate::compute_hash(desired.kind(), self.kind, self.data);
             if desired != actual_id {
                 return Err(Error::ChecksumMismatch {
                     desired: desired.into(),
@@ -91,6 +86,9 @@ mod tests {
 
     #[test]
     fn size_of_object() {
+        #[cfg(target_pointer_width = "64")]
         assert_eq!(std::mem::size_of::<Data<'_>>(), 24, "this shouldn't change unnoticed");
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(std::mem::size_of::<Data<'_>>(), 12, "this shouldn't change unnoticed");
     }
 }

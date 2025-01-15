@@ -2,7 +2,6 @@ use gix_date::{
     time::{format, Format, Sign},
     Time,
 };
-use time::macros::format_description;
 
 #[test]
 fn short() {
@@ -18,9 +17,20 @@ fn unix() {
 
 #[test]
 fn raw() {
-    let expected = "123456789 +0230";
-    assert_eq!(time().format(Format::Raw), expected);
-    assert_eq!(time().format(format::RAW), expected);
+    for (time, expected) in [
+        (time(), "123456789 +0230"),
+        (
+            Time {
+                seconds: 1112911993,
+                offset: 3600,
+                sign: Sign::Plus,
+            },
+            "1112911993 +0100",
+        ),
+    ] {
+        assert_eq!(time.format(Format::Raw), expected);
+        assert_eq!(time.format(format::RAW), expected);
+    }
 }
 
 #[test]
@@ -57,7 +67,7 @@ fn default() {
     assert_eq!(
         time_dec1().format(gix_date::time::format::GITOXIDE),
         "Sat Dec 01 1973 00:03:09 +0230"
-    )
+    );
 }
 
 #[test]
@@ -69,29 +79,21 @@ fn git_default() {
     assert_eq!(
         time_dec1().format(gix_date::time::format::DEFAULT),
         "Sat Dec 1 00:03:09 1973 +0230"
-    )
-}
-
-#[test]
-fn custom_compile_time() {
-    assert_eq!(
-        time().format(format_description!("[year]-[month]-[day] [hour]:[minute]:[second]")),
-        "1973-11-30 00:03:09",
     );
 }
 
 fn time() -> Time {
     Time {
-        seconds_since_unix_epoch: 123456789,
-        offset_in_seconds: 9000,
+        seconds: 123456789,
+        offset: 9000,
         sign: Sign::Plus,
     }
 }
 
 fn time_dec1() -> Time {
     Time {
-        seconds_since_unix_epoch: 123543189,
-        offset_in_seconds: 9000,
+        seconds: 123543189,
+        offset: 9000,
         sign: Sign::Plus,
     }
 }

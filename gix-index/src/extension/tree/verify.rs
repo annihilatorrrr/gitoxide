@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 
 use bstr::{BString, ByteSlice};
+use gix_object::FindExt;
 
 use crate::extension::Tree;
 
-/// The error returned by [Tree::verify()][crate::extension::Tree::verify()].
+/// The error returned by [`Tree::verify()`][crate::extension::Tree::verify()].
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
@@ -14,8 +15,8 @@ pub enum Error {
         entry_id: gix_hash::ObjectId,
         name: BString,
     },
-    #[error("The tree with id {oid} wasn't found in the object database")]
-    TreeNodeNotFound { oid: gix_hash::ObjectId },
+    #[error(transparent)]
+    TreeNodeNotFound(#[from] gix_object::find::existing_iter::Error),
     #[error("The tree with id {oid} should have {expected_childcount} children, but its cached representation had {actual_childcount} of them")]
     TreeNodeChildcountMismatch {
         oid: gix_hash::ObjectId,
@@ -39,20 +40,14 @@ pub enum Error {
 }
 
 impl Tree {
-    ///
-    pub fn verify<F>(&self, use_find: bool, mut find: F) -> Result<(), Error>
-    where
-        F: for<'a> FnMut(&gix_hash::oid, &'a mut Vec<u8>) -> Option<gix_object::TreeRefIter<'a>>,
-    {
-        fn verify_recursive<F>(
+    /// Validate the correctness of this instance. If `use_objects` is true, then `objects` will be used to access all objects.
+    pub fn verify(&self, use_objects: bool, objects: impl gix_object::Find) -> Result<(), Error> {
+        fn verify_recursive(
             parent_id: gix_hash::ObjectId,
             children: &[Tree],
-            mut find_buf: Option<&mut Vec<u8>>,
-            find: &mut F,
-        ) -> Result<Option<u32>, Error>
-        where
-            F: for<'a> FnMut(&gix_hash::oid, &'a mut Vec<u8>) -> Option<gix_object::TreeRefIter<'a>>,
-        {
+            mut object_buf: Option<&mut Vec<u8>>,
+            objects: &impl gix_object::Find,
+        ) -> Result<Option<u32>, Error> {
             if children.is_empty() {
                 return Ok(None);
             }
@@ -71,13 +66,10 @@ impl Tree {
                 }
                 prev = Some(child);
             }
-            if let Some(buf) = find_buf.as_mut() {
-                let tree_entries = find(&parent_id, buf).ok_or(Error::TreeNodeNotFound { oid: parent_id })?;
+            if let Some(buf) = object_buf.as_mut() {
+                let tree_entries = objects.find_tree_iter(&parent_id, buf)?;
                 let mut num_entries = 0;
-                for entry in tree_entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.mode == gix_object::tree::EntryMode::Tree)
-                {
+                for entry in tree_entries.filter_map(Result::ok).filter(|e| e.mode.is_tree()) {
                     children
                         .binary_search_by(|e| e.name.as_bstr().cmp(entry.filename))
                         .map_err(|_| Error::MissingTreeDirectory {
@@ -99,7 +91,8 @@ impl Tree {
             for child in children {
                 // This is actually needed here as it's a mut ref, which isn't copy. We do a re-borrow here.
                 #[allow(clippy::needless_option_as_deref)]
-                let actual_num_entries = verify_recursive(child.id, &child.children, find_buf.as_deref_mut(), find)?;
+                let actual_num_entries =
+                    verify_recursive(child.id, &child.children, object_buf.as_deref_mut(), objects)?;
                 if let Some((actual, num_entries)) = actual_num_entries.zip(child.num_entries) {
                     if actual > num_entries {
                         return Err(Error::EntriesCount {
@@ -111,6 +104,7 @@ impl Tree {
             }
             Ok(entries.into())
         }
+        let _span = gix_features::trace::coarse!("gix_index::extension::Tree::verify()");
 
         if !self.name.is_empty() {
             return Err(Error::RootWithName {
@@ -119,7 +113,7 @@ impl Tree {
         }
 
         let mut buf = Vec::new();
-        let declared_entries = verify_recursive(self.id, &self.children, use_find.then_some(&mut buf), &mut find)?;
+        let declared_entries = verify_recursive(self.id, &self.children, use_objects.then_some(&mut buf), &objects)?;
         if let Some((actual, num_entries)) = declared_entries.zip(self.num_entries) {
             if actual > num_entries {
                 return Err(Error::EntriesCount {

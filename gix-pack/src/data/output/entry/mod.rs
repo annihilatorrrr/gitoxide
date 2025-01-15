@@ -1,4 +1,4 @@
-use std::{convert::TryFrom, io::Write};
+use std::io::Write;
 
 use gix_hash::ObjectId;
 
@@ -10,7 +10,7 @@ pub use iter_from_counts::function::iter_from_counts;
 
 /// The kind of pack entry to be written
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Kind {
     /// A complete base object, including its kind
     Base(gix_object::Kind),
@@ -37,6 +37,8 @@ pub enum Kind {
 pub enum Error {
     #[error("{0}")]
     ZlibDeflate(#[from] std::io::Error),
+    #[error(transparent)]
+    EntryType(#[from] crate::data::entry::decode::Error),
 }
 
 impl output::Entry {
@@ -66,15 +68,18 @@ impl output::Entry {
         potential_bases: &[output::Count],
         bases_index_offset: usize,
         pack_offset_to_oid: Option<impl FnMut(u32, u64) -> Option<ObjectId>>,
-        target_version: crate::data::Version,
+        target_version: data::Version,
     ) -> Option<Result<Self, Error>> {
         if entry.version != target_version {
             return None;
         };
 
         let pack_offset_must_be_zero = 0;
-        let pack_entry =
-            crate::data::Entry::from_bytes(&entry.data, pack_offset_must_be_zero, count.id.as_slice().len());
+        let pack_entry = match data::Entry::from_bytes(&entry.data, pack_offset_must_be_zero, count.id.as_slice().len())
+        {
+            Ok(e) => e,
+            Err(err) => return Some(Err(err.into())),
+        };
 
         use crate::data::entry::Header::*;
         match pack_entry.header {
@@ -126,7 +131,7 @@ impl output::Entry {
         })
     }
 
-    /// Create a new instance from the given `oid` and its corresponding git `obj`ect data.
+    /// Create a new instance from the given `oid` and its corresponding git object data `obj`.
     pub fn from_data(count: &output::Count, obj: &gix_object::Data<'_>) -> Result<Self, Error> {
         Ok(output::Entry {
             id: count.id.to_owned(),
@@ -153,9 +158,9 @@ impl output::Entry {
     /// This information is known to the one calling the method.
     pub fn to_entry_header(
         &self,
-        version: crate::data::Version,
+        version: data::Version,
         index_to_base_distance: impl FnOnce(usize) -> u64,
-    ) -> crate::data::entry::Header {
+    ) -> data::entry::Header {
         assert!(
             matches!(version, data::Version::V2),
             "we can only write V2 pack entries for now"

@@ -1,5 +1,5 @@
 //! an index into the pack file
-//!
+
 /// From itertools
 /// Create an iterator running multiple iterators in lockstep.
 ///
@@ -21,7 +21,7 @@
 ///
 /// [`multizip`]: fn.multizip.html
 ///
-/// ```
+/// ```ignore
 /// # use itertools::izip;
 /// #
 /// # fn main() {
@@ -37,6 +37,9 @@
 /// assert_eq!(results, [0 + 3, 10 + 7, 29, 36]);
 /// # }
 /// ```
+///
+/// (The above is vendored from [itertools](https://github.com/rust-itertools/itertools),
+/// including the original doctest, though it has been marked `ignore` here.)
 macro_rules! izip {
     // @closure creates a tuple-flattening closure for .map() call. usage:
     // @closure partial_pattern => partial_tuple , rest , of , iterators
@@ -76,18 +79,13 @@ macro_rules! izip {
 use memmap2::Mmap;
 
 /// The version of an index file
-#[derive(PartialEq, Eq, Ord, PartialOrd, Debug, Hash, Clone, Copy)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default, PartialEq, Eq, Ord, PartialOrd, Debug, Hash, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[allow(missing_docs)]
 pub enum Version {
     V1 = 1,
+    #[default]
     V2 = 2,
-}
-
-impl Default for Version {
-    fn default() -> Self {
-        Version::V2
-    }
 }
 
 impl Version {
@@ -146,10 +144,12 @@ pub mod init;
 pub(crate) mod access;
 pub use access::Entry;
 
+pub(crate) mod encode;
 ///
 pub mod traverse;
 mod util;
 ///
 pub mod verify;
 ///
+#[cfg(feature = "streaming-input")]
 pub mod write;

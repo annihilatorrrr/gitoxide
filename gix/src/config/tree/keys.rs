@@ -1,4 +1,5 @@
 #![allow(clippy::result_large_err)]
+use gix_config::KeyRef;
 use std::{
     borrow::Cow,
     error::Error,
@@ -146,6 +147,28 @@ impl<T: Validate> Key for Any<T> {
     }
 }
 
+impl<T: Validate> gix_config::AsKey for Any<T> {
+    fn as_key(&self) -> gix_config::KeyRef<'_> {
+        self.try_as_key().expect("infallible")
+    }
+
+    fn try_as_key(&self) -> Option<KeyRef<'_>> {
+        let section_name = self.section.parent().map_or_else(|| self.section.name(), Section::name);
+        let subsection_name = if self.section.parent().is_some() {
+            Some(self.section.name().into())
+        } else {
+            None
+        };
+        let value_name = self.name;
+        gix_config::KeyRef {
+            section_name,
+            subsection_name,
+            value_name,
+        }
+        .into()
+    }
+}
+
 /// A key which represents a date.
 pub type Time = Any<validate::Time>;
 
@@ -165,9 +188,19 @@ pub type RemoteName = Any<validate::RemoteName>;
 pub type Boolean = Any<validate::Boolean>;
 
 /// A key that represents an executable program, shell script or shell commands.
+///
+/// Once obtained with [trusted_program()](crate::config::Snapshot::trusted_program())
+/// one can run it with [command::prepare()](gix_command::prepare), possibly after
+/// [obtaining](crate::Repository::command_context) and [setting](gix_command::Prepare::with_context)
+/// a git [command context](gix_command::Context) (depending on the commands needs).
 pub type Program = Any<validate::Program>;
 
 /// A key that represents an executable program as identified by name or path.
+///
+/// Once obtained with [trusted_program()](crate::config::Snapshot::trusted_program())
+/// one can run it with [command::prepare()](gix_command::prepare), possibly after
+/// [obtaining](crate::Repository::command_context) and [setting](gix_command::Prepare::with_context)
+/// a git [command context](gix_command::Context) (depending on the commands needs).
 pub type Executable = Any<validate::Executable>;
 
 /// A key that represents a path (to a resource).
@@ -179,10 +212,10 @@ pub type Url = Any<validate::Url>;
 /// A key that represents a UTF-8 string.
 pub type String = Any<validate::String>;
 
-/// A key that represents a RefSpec for pushing.
+/// A key that represents a `RefSpec` for pushing.
 pub type PushRefSpec = Any<validate::PushRefSpec>;
 
-/// A key that represents a RefSpec for fetching.
+/// A key that represents a `RefSpec` for fetching.
 pub type FetchRefSpec = Any<validate::FetchRefSpec>;
 
 mod duration {
@@ -237,7 +270,7 @@ mod lock_timeout {
             let value = value.map_err(|err| config::lock_timeout::Error::from(self).with_source(err))?;
             Ok(match value {
                 val if val < 0 => Fail::AfterDurationWithBackoff(Duration::from_secs(u64::MAX)),
-                val if val == 0 => Fail::Immediately,
+                0 => Fail::Immediately,
                 val => Fail::AfterDurationWithBackoff(Duration::from_millis(
                     val.try_into().expect("i64 to u64 always works if positive"),
                 )),
@@ -464,7 +497,7 @@ mod remote_name {
     }
 }
 
-/// Provide a way to validate a value, or decode a value from `gix-config`.
+/// Provide a way to validate a value, or decode a value from `git-config`.
 pub trait Validate {
     /// Validate `value` or return an error.
     fn validate(&self, value: &BStr) -> Result<(), Box<dyn Error + Send + Sync + 'static>>;
@@ -511,7 +544,8 @@ pub mod validate {
                 gix_config::Integer::try_from(value)?
                     .to_decimal()
                     .ok_or_else(|| format!("integer {value} cannot be represented as `usize`"))?,
-            )?;
+            )
+            .map_err(|_| "cannot use sign for unsigned integer")?;
             Ok(())
         }
     }

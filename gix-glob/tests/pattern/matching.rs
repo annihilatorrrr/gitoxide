@@ -66,10 +66,17 @@ fn compare_baseline_with_ours() {
                 is_match, *expected_matches,
                 "baseline for matches must be {expected_matches} - check baseline and git version: {m:?}"
             );
-            match std::panic::catch_unwind(|| {
+            let actual = std::panic::catch_unwind(|| {
                 let pattern = pat(pattern);
-                pattern.matches_repo_relative_path(value, basename_start_pos(value), None, *case)
-            }) {
+                pattern.matches_repo_relative_path(
+                    value,
+                    basename_start_pos(value),
+                    None,
+                    *case,
+                    gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
+                )
+            });
+            match actual {
                 Ok(actual_match) => {
                     if actual_match == is_match {
                         total_correct += 1;
@@ -105,11 +112,23 @@ fn non_dirs_for_must_be_dir_patterns_are_ignored() {
     );
     let path = "hello";
     assert!(
-        !pattern.matches_repo_relative_path(path, None, false.into() /* is-dir */, Case::Sensitive),
+        !pattern.matches_repo_relative_path(
+            path.into(),
+            None,
+            false.into(), /* is-dir */
+            Case::Sensitive,
+            gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL
+        ),
         "non-dirs never match a dir pattern"
     );
     assert!(
-        pattern.matches_repo_relative_path(path, None, true.into() /* is-dir */, Case::Sensitive),
+        pattern.matches_repo_relative_path(
+            path.into(),
+            None,
+            true.into(), /* is-dir */
+            Case::Sensitive,
+            gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL
+        ),
         "dirs can match a dir pattern with the normal rules"
     );
 }
@@ -271,7 +290,7 @@ fn names_do_not_automatically_match_entire_directories() {
 
 #[test]
 fn directory_patterns_do_not_match_files_within_a_directory_as_well_like_slash_star_star() {
-    // this feature is implemented with the directory stack, which excludes entire directories
+    // this feature is implemented with the directory stack in `gix-ignore`, which excludes entire directories
     let pattern = &pat("dir/");
     assert!(!match_path(pattern, "dir/file", None, Case::Sensitive));
     assert!(!match_path(pattern, "base/dir/file", None, Case::Sensitive));
@@ -307,6 +326,23 @@ fn single_paths_match_anywhere() {
     );
 }
 
+#[test]
+fn fuzzed_exponential_runaway_denial_of_service() {
+    // original: "?[at(/\u{1d}\0\u{4}\u{14}\0[[[[:[\0\0\0\0\0\0\0\0Wt(/\u{1d}\0\u{4}\u{14}\0[[[[:[\0\0\0\0\0\0\0\0\0\0\0]"
+    //  reduced: "[[:[:]"
+    for pattern in [
+        include_bytes!("../fixtures/fuzzed/many-stars.pattern"),
+        "*?[wxxxxxx\0!t[:rt]\u{14}*".as_bytes(),
+        "?[at(/\u{1d}\0\u{4}\u{14}\0[[[[:[\0\0\0\0\0\0\0\0\0\0/s\0\0\0*\0\0\0\0\0\0\0\0]\0\0\0\0\0\0\0\0\0".as_bytes(),
+        b"[[:digit]ab]",
+        b"[[:]ab]",
+        b"[[:[:x]",
+    ] {
+        let pat = pat(pattern);
+        match_file(&pat, "relative/path", Case::Sensitive);
+    }
+}
+
 fn pat<'a>(pattern: impl Into<&'a BStr>) -> gix_glob::Pattern {
     gix_glob::Pattern::from_bytes(pattern.into()).expect("parsing works")
 }
@@ -317,7 +353,13 @@ fn match_file<'a>(pattern: &gix_glob::Pattern, path: impl Into<&'a BStr>, case: 
 
 fn match_path<'a>(pattern: &gix_glob::Pattern, path: impl Into<&'a BStr>, is_dir: Option<bool>, case: Case) -> bool {
     let path = path.into();
-    pattern.matches_repo_relative_path(path, basename_start_pos(path), is_dir, case)
+    pattern.matches_repo_relative_path(
+        path,
+        basename_start_pos(path),
+        is_dir,
+        case,
+        gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
+    )
 }
 
 fn basename_start_pos(value: &BStr) -> Option<usize> {

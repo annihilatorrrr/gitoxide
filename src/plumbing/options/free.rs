@@ -14,6 +14,8 @@ pub enum Subcommands {
     Pack(pack::Subcommands),
     /// Subcommands for interacting with a worktree index, typically at .git/index
     Index(index::Platform),
+    /// Show information about repository discovery and when opening a repository at the current path.
+    Discover,
 }
 
 ///
@@ -53,10 +55,24 @@ pub mod index {
 
     #[derive(Debug, clap::Subcommand)]
     pub enum Subcommands {
+        /// Create an index from a list of empty files, one per line of the input.
+        FromList {
+            /// Overwrite the specified index file if it already exists.
+            #[clap(long, short = 'f')]
+            force: bool,
+            /// Path to the index file to be written.
+            /// If none is given it will be kept in memory only as a way to measure performance. One day we will probably write the index
+            /// back by default, but that requires us to write more of the index to work.
+            #[clap(long, short = 'i')]
+            index_output_path: Option<PathBuf>,
+            /// Don't write the trailing hash for a performance gain.
+            #[clap(long, short = 's')]
+            skip_hash: bool,
+            /// The file to read the index entries from, one path per line.
+            file: PathBuf,
+        },
         /// Validate constraints and assumptions of an index along with its integrity.
         Verify,
-        /// Print all entries to standard output
-        Entries,
         /// Print information about the index structure
         Info {
             /// Do not extract specific extension information to gain only a superficial idea of the index's composition.
@@ -107,7 +123,7 @@ pub mod pack {
             /// Possible values are "none" and "tree-traversal". Default is "none".
             expansion: Option<core::pack::create::ObjectExpansion>,
 
-            #[clap(long, default_value_t = 3, requires = "nondeterministic-count")]
+            #[clap(long, default_value_t = 3, requires = "nondeterministic_count")]
             /// The amount of threads to use when counting and the `--nondeterminisitc-count` flag is set, defaulting
             /// to the globally configured threads.
             ///
@@ -287,13 +303,13 @@ pub mod pack {
 
         #[derive(Debug, clap::Subcommand)]
         pub enum Subcommands {
-            /// Display all entries of a multi-index: <oid> <pack-id> <pack-offset>
+            /// Display all entries of a multi-index as: *oid* *pack-id* *pack-offset*
             Entries,
             /// Print general information about a multi-index file
             Info,
             /// Verify a multi-index quickly without inspecting objects themselves
             Verify,
-            /// Create a multi-pack index from one or more pack index files, overwriting possibloy existing files.
+            /// Create a multi-pack index from one or more pack index files, overwriting possibly existing files.
             Create {
                 /// Paths to the pack index files to read (with .idx extension).
                 ///

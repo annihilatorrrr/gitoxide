@@ -2,10 +2,10 @@
 //!
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 // `unsafe_code` not forbidden because we need to interact with the libc
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
@@ -13,7 +13,7 @@ use std::fmt::{Display, Formatter};
 
 /// A way to specify how 'safe' we feel about a resource, typically about a git repository.
 #[derive(Copy, Clone, Ord, PartialOrd, PartialEq, Eq, Debug, Hash)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Trust {
     /// Caution is warranted when using the resource.
     Reduced,
@@ -26,7 +26,7 @@ pub mod trust;
 
 /// Allow, deny or forbid using a resource or performing an action.
 #[derive(Debug, Copy, Clone, PartialOrd, PartialEq, Ord, Eq, Hash)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Permission {
     /// Fail outright when trying to load a resource or performing an action.
     Forbid,
@@ -41,7 +41,8 @@ pub mod permission;
 
 bitflags::bitflags! {
     /// Whether something can be read or written.
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[derive(Debug)]
     pub struct ReadWrite: u8 {
         /// The item can be read.
         const READ = 1 << 0;

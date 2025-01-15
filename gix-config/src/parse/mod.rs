@@ -1,4 +1,4 @@
-//! This module handles parsing a `gix-config` file. Generally speaking, you
+//! This module handles parsing a `git-config` file. Generally speaking, you
 //! want to use a higher abstraction such as [`File`] unless you have some
 //! explicit reason to work with events instead.
 //!
@@ -25,10 +25,6 @@ mod error;
 ///
 pub mod section;
 
-///
-mod key;
-pub use key::{parse_unvalidated as key, Key};
-
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -53,16 +49,16 @@ pub enum Event<'a> {
     /// name and `origin` as subsection name.
     SectionHeader(section::Header<'a>),
     /// A name to a value in a section, like `url` in `remote.origin.url`.
-    SectionKey(section::Key<'a>),
+    SectionValueName(section::ValueName<'a>),
     /// A completed value. This may be any single-line string, including the empty string
     /// if an implicit boolean value is used.
     /// Note that these values may contain spaces and any special character. This value is
-    /// also unprocessed, so it it may contain double quotes that should be
+    /// also unprocessed, so it may contain double quotes that should be
     /// [normalized][crate::value::normalize()] before interpretation.
     Value(Cow<'a, BStr>),
     /// Represents any token used to signify a newline character. On Unix
     /// platforms, this is typically just `\n`, but can be any valid newline
-    /// sequence. Multiple newlines (such as `\n\n`) will be merged as a single
+    /// *sequence*. Multiple newlines (such as `\n\n`) will be merged as a single
     /// newline event containing a string of multiple newline characters.
     Newline(Cow<'a, BStr>),
     /// Any value that isn't completed. This occurs when the value is continued
@@ -93,7 +89,7 @@ pub struct Section<'a> {
     /// The section name and subsection name, if any.
     pub header: section::Header<'a>,
     /// The syntactic events found in this section.
-    pub events: section::Events<'a>,
+    pub events: Vec<Event<'a>>,
 }
 
 /// A parsed comment containing the comment marker and comment.

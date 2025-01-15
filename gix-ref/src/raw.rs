@@ -4,13 +4,16 @@ use crate::{FullName, Target};
 
 /// A fully owned backend agnostic reference
 #[derive(PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone)]
-#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reference {
     /// The path to uniquely identify this ref within its store.
     pub name: FullName,
     /// The target of the reference, either a symbolic reference by full name or a possibly intermediate object by its id.
     pub target: Target,
-    /// The fully peeled object to which this reference ultimately points to. Only guaranteed to be set after `peel_to_id_in_place()` was called.
+    /// The fully peeled object to which this reference ultimately points to after following all symbolic refs and all annotated
+    /// tags. Only guaranteed to be set after
+    /// [`Reference::peel_to_id_in_place()`](crate::file::ReferenceExt) was called or if this reference originated
+    /// from a packed ref.
     pub peeled: Option<ObjectId>,
 }
 
@@ -46,7 +49,7 @@ mod convert {
         fn from(value: packed::Reference<'p>) -> Self {
             Reference {
                 name: value.name.into(),
-                target: Target::Peeled(value.target()),
+                target: Target::Object(value.target()),
                 peeled: value
                     .object
                     .map(|hex| ObjectId::from_hex(hex).expect("parser validation")),
@@ -91,13 +94,15 @@ mod access {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gix_testtools::size_ok;
 
     #[test]
     fn size_of_reference() {
-        assert_eq!(
-            std::mem::size_of::<Reference>(),
-            80,
-            "let's not let it change size undetected"
+        let actual = std::mem::size_of::<Reference>();
+        let expected = 80;
+        assert!(
+            size_ok(actual, expected),
+            "let's not let it change size undetected: {actual} <~ {expected}"
         );
     }
 }

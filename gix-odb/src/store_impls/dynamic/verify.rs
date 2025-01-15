@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use gix_features::progress::{MessageLevel, Progress};
+use gix_features::progress::{DynNestedProgress, MessageLevel, Progress};
 
 use crate::{
     pack,
@@ -44,7 +44,7 @@ pub mod integrity {
     }
 
     #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Clone)]
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     /// Integrity information about loose object databases
     pub struct LooseObjectStatistics {
         /// The path to the root directory of the loose objects database
@@ -54,7 +54,7 @@ pub mod integrity {
     }
 
     #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Clone)]
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     /// Traversal statistics of packs governed by single indices or multi-pack indices.
     #[allow(missing_docs)]
     pub enum SingleOrMultiStatistics {
@@ -64,22 +64,20 @@ pub mod integrity {
 
     /// Statistics gathered when traversing packs of various kinds of indices.
     #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Clone)]
-    #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct IndexStatistics {
-        /// The path to the index or multi-pack index for which statics were gathered.
+        /// The path to the index or multi-pack index for which statistics were gathered.
         pub path: PathBuf,
         /// The actual statistics for the index at `path`.
         pub statistics: SingleOrMultiStatistics,
     }
 
     /// Returned by [`Store::verify_integrity()`][crate::Store::verify_integrity()].
-    pub struct Outcome<P> {
+    pub struct Outcome {
         /// Statistics for validated loose object stores.
         pub loose_object_stores: Vec<LooseObjectStatistics>,
         /// Pack traversal statistics for each index and their pack(s)
         pub index_statistics: Vec<IndexStatistics>,
-        /// The provided progress instance.
-        pub progress: P,
     }
 
     /// The progress ids used in [`Store::verify_integrity()`][crate::Store::verify_integrity()].
@@ -109,19 +107,19 @@ pub mod integrity {
 impl super::Store {
     /// Check the integrity of all objects as per the given `options`.
     ///
-    /// Note that this will not not force loading all indices or packs permanently, as we will only use the momentarily loaded disk state.
+    /// Note that this will not force loading all indices or packs permanently, as we will only use the momentarily loaded disk state.
     /// This does, however, include all alternates.
-    pub fn verify_integrity<C, P, F>(
+    pub fn verify_integrity<C, F>(
         &self,
-        mut progress: P,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
         options: integrity::Options<F>,
-    ) -> Result<integrity::Outcome<P>, integrity::Error>
+    ) -> Result<integrity::Outcome, integrity::Error>
     where
-        P: Progress,
         C: pack::cache::DecodeEntry,
         F: Fn() -> C + Send + Clone,
     {
+        let _span = gix_features::trace::coarse!("gix_odb:Store::verify_integrity()");
         let mut index = self.index.load();
         if !index.is_initialized() {
             self.consolidate_with_disk_state(true, false)?;
@@ -129,7 +127,7 @@ impl super::Store {
             assert!(
                 index.is_initialized(),
                 "BUG: after consolidating successfully, we have an initialized index"
-            )
+            );
         }
 
         progress.init(
@@ -141,127 +139,131 @@ impl super::Store {
             format!(
                 "Checking integrity: {}",
                 path.file_name()
-                    .map(|f| f.to_string_lossy())
-                    .unwrap_or_else(std::borrow::Cow::default)
+                    .map_or_else(Default::default, std::ffi::OsStr::to_string_lossy)
             )
         };
-        for slot_index in &index.slot_indices {
-            let slot = &self.files[*slot_index];
-            if slot.generation.load(Ordering::SeqCst) != index.generation {
-                return Err(integrity::Error::NeedsRetryDueToChangeOnDisk);
-            }
-            let files = slot.files.load();
-            let files = Option::as_ref(&files).ok_or(integrity::Error::NeedsRetryDueToChangeOnDisk)?;
+        gix_features::trace::detail!("verify indices").into_scope(|| {
+            for slot_index in &index.slot_indices {
+                let slot = &self.files[*slot_index];
+                if slot.generation.load(Ordering::SeqCst) != index.generation {
+                    return Err(integrity::Error::NeedsRetryDueToChangeOnDisk);
+                }
+                let files = slot.files.load();
+                let files = Option::as_ref(&files).ok_or(integrity::Error::NeedsRetryDueToChangeOnDisk)?;
 
-            let start = Instant::now();
-            let (mut child_progress, num_objects, index_path) = match files {
-                IndexAndPacks::Index(bundle) => {
-                    let index;
-                    let index = match bundle.index.loaded() {
-                        Some(index) => index.deref(),
-                        None => {
-                            index = pack::index::File::at(bundle.index.path(), self.object_hash)?;
-                            &index
-                        }
-                    };
-                    let pack;
-                    let data = match bundle.data.loaded() {
-                        Some(pack) => pack.deref(),
-                        None => {
-                            pack = pack::data::File::at(bundle.data.path(), self.object_hash)?;
-                            &pack
-                        }
-                    };
-                    let outcome = index.verify_integrity(
-                        Some(pack::index::verify::PackContext {
-                            data,
-                            options: options.clone(),
-                        }),
-                        progress.add_child_with_id(
-                            "verify index",
+                let start = Instant::now();
+                let (mut child_progress, num_objects, index_path) = match files {
+                    IndexAndPacks::Index(bundle) => {
+                        let index;
+                        let index = match bundle.index.loaded() {
+                            Some(index) => index.deref(),
+                            None => {
+                                index = pack::index::File::at(bundle.index.path(), self.object_hash)?;
+                                &index
+                            }
+                        };
+                        let pack;
+                        let data = match bundle.data.loaded() {
+                            Some(pack) => pack.deref(),
+                            None => {
+                                pack = pack::data::File::at(bundle.data.path(), self.object_hash)?;
+                                &pack
+                            }
+                        };
+                        let mut child_progress = progress.add_child_with_id(
+                            "verify index".into(),
                             integrity::ProgressId::VerifyIndex(Default::default()).into(),
-                        ),
-                        should_interrupt,
-                    )?;
-                    statistics.push(IndexStatistics {
-                        path: bundle.index.path().to_owned(),
-                        statistics: SingleOrMultiStatistics::Single(
-                            outcome
-                                .pack_traverse_statistics
-                                .expect("pack provided so there are stats"),
-                        ),
-                    });
-                    (outcome.progress, index.num_objects(), index.path().to_owned())
-                }
-                IndexAndPacks::MultiIndex(bundle) => {
-                    let index;
-                    let index = match bundle.multi_index.loaded() {
-                        Some(index) => index.deref(),
-                        None => {
-                            index = pack::multi_index::File::at(bundle.multi_index.path())?;
-                            &index
-                        }
-                    };
-                    let outcome = index.verify_integrity(
-                        progress.add_child_with_id(
-                            "verify multi-index",
+                        );
+                        let outcome = index.verify_integrity(
+                            Some(pack::index::verify::PackContext {
+                                data,
+                                options: options.clone(),
+                            }),
+                            &mut child_progress,
+                            should_interrupt,
+                        )?;
+                        statistics.push(IndexStatistics {
+                            path: bundle.index.path().to_owned(),
+                            statistics: SingleOrMultiStatistics::Single(
+                                outcome
+                                    .pack_traverse_statistics
+                                    .expect("pack provided so there are stats"),
+                            ),
+                        });
+                        (child_progress, index.num_objects(), index.path().to_owned())
+                    }
+                    IndexAndPacks::MultiIndex(bundle) => {
+                        let index;
+                        let index = match bundle.multi_index.loaded() {
+                            Some(index) => index.deref(),
+                            None => {
+                                index = pack::multi_index::File::at(bundle.multi_index.path())?;
+                                &index
+                            }
+                        };
+                        let mut child_progress = progress.add_child_with_id(
+                            "verify multi-index".into(),
                             integrity::ProgressId::VerifyMultiIndex(Default::default()).into(),
-                        ),
-                        should_interrupt,
-                        options.clone(),
-                    )?;
+                        );
+                        let outcome = index.verify_integrity(&mut child_progress, should_interrupt, options.clone())?;
 
-                    let index_dir = bundle.multi_index.path().parent().expect("file in a directory");
-                    statistics.push(IndexStatistics {
-                        path: Default::default(),
-                        statistics: SingleOrMultiStatistics::Multi(
-                            outcome
-                                .pack_traverse_statistics
-                                .into_iter()
-                                .zip(index.index_names())
-                                .map(|(statistics, index_name)| (index_dir.join(index_name), statistics))
-                                .collect(),
-                        ),
-                    });
-                    (outcome.progress, index.num_objects(), index.path().to_owned())
-                }
-            };
+                        let index_dir = bundle.multi_index.path().parent().expect("file in a directory");
+                        statistics.push(IndexStatistics {
+                            path: Default::default(),
+                            statistics: SingleOrMultiStatistics::Multi(
+                                outcome
+                                    .pack_traverse_statistics
+                                    .into_iter()
+                                    .zip(index.index_names())
+                                    .map(|(statistics, index_name)| (index_dir.join(index_name), statistics))
+                                    .collect(),
+                            ),
+                        });
+                        (child_progress, index.num_objects(), index.path().to_owned())
+                    }
+                };
 
-            child_progress.set_name(index_check_message(&index_path));
-            child_progress.show_throughput_with(
-                start,
-                num_objects as usize,
-                gix_features::progress::count("objects").expect("set"),
-                MessageLevel::Success,
-            );
-            progress.inc();
-        }
+                child_progress.set_name(index_check_message(&index_path));
+                child_progress.show_throughput_with(
+                    start,
+                    num_objects as usize,
+                    gix_features::progress::count("objects").expect("set"),
+                    MessageLevel::Success,
+                );
+                progress.inc();
+            }
+            Ok(())
+        })?;
 
         progress.init(
             Some(index.loose_dbs.len()),
             gix_features::progress::count("loose object stores"),
         );
         let mut loose_object_stores = Vec::new();
-        for loose_db in &*index.loose_dbs {
-            let out = loose_db
-                .verify_integrity(
-                    progress.add_child_with_id(
-                        loose_db.path().display().to_string(),
-                        integrity::ProgressId::VerifyLooseObjectDbPath.into(),
-                    ),
-                    should_interrupt,
-                )
-                .map(|statistics| integrity::LooseObjectStatistics {
-                    path: loose_db.path().to_owned(),
-                    statistics,
-                })?;
-            loose_object_stores.push(out);
-        }
+        gix_features::trace::detail!("verify loose ODBs").into_scope(
+            || -> Result<_, crate::loose::verify::integrity::Error> {
+                for loose_db in &*index.loose_dbs {
+                    let out = loose_db
+                        .verify_integrity(
+                            &mut progress.add_child_with_id(
+                                loose_db.path().display().to_string(),
+                                integrity::ProgressId::VerifyLooseObjectDbPath.into(),
+                            ),
+                            should_interrupt,
+                        )
+                        .map(|statistics| integrity::LooseObjectStatistics {
+                            path: loose_db.path().to_owned(),
+                            statistics,
+                        })?;
+                    loose_object_stores.push(out);
+                }
+                Ok(())
+            },
+        )?;
 
         Ok(integrity::Outcome {
             loose_object_stores,
             index_statistics: statistics,
-            progress,
         })
     }
 }
